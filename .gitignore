@@ -5,8 +5,16 @@
 # `.tfstate` files contain sensitive state data (passwords, IP addresses, tokens)
 *.tfstate
 *.tfstate.*
+*.tfstate.backup
 crash.log
 crash.*.log
+
+# Terraform execution plans contain sensitive state data in binary format
+*.tfplan
+*.plan
+
+# State lock files
+.terraform.tfstate.lock.info
 
 # Terraform variable definitions containing secrets
 *.tfvars
@@ -20,18 +28,58 @@ override.tf.json
 .terraformrc
 terraform.rc
 
-# ─── Secrets & Environment Files ──────────────────────────────────────────────
+# ─── Secrets, Keys & Environment Files ─────────────────────────────────────────
 .env
 .env.local
 .env.*.local
+!.env.example
 *.pem
 *.key
 *.crt
+*.p12
+*.pfx
+*.csr
+*.id_rsa
+id_rsa*
+credentials.json
+aws-credentials
 
 # ─── Kubernetes / Helm ────────────────────────────────────────────────────────
 kubeconfig
 *.kubeconfig
+kubeconfig.yaml
+kubeconfig.*.yaml
 .kube/
+
+# Helm package artifacts & downloaded subcharts
+*.tgz
+charts/*/charts/
+charts/*/*.tgz
+.helm/
+
+# ─── Frontend & Node.js ───────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+dist/
+build/
+.angular/
+
+# ─── Backend & Python ──────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+ENV/
+.pytest_cache/
+.coverage
+htmlcov/
 
 # ─── Operating System & Editors ───────────────────────────────────────────────
 # macOS
@@ -47,6 +95,10 @@ ehthumbs_vista.db
 [Dd]esktop.ini
 $RECYCLE.BIN/
 
+# Linux
+*~
+.directory
+
 # VS Code / JetBrains / Editors
 .vscode/
 !.vscode/settings.json
@@ -56,10 +108,8 @@ $RECYCLE.BIN/
 .idea/
 *.swp
 *.swo
-*~
+*.bak
 
 # ─── Antigravity & AI Tool Scratch ────────────────────────────────────────────
 .antigravity/
-*.exe
-istioctl
-istioctl.exe
+

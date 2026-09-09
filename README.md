@@ -1,6 +1,6 @@
-# 3-Tier Task Manager — AWS EKS + GitOps
+# EKS GitOps Platform — 3-Tier Production Architecture on AWS EKS
 
-A production-grade, cloud-native **3-tier task manager** application deployed on **AWS EKS** with a fully automated **GitOps** pipeline using ArgoCD.
+A production-grade, enterprise **EKS GitOps Platform** hosting a cloud-native 3-tier task manager application on **AWS EKS** with a fully automated **GitOps** pipeline using ArgoCD and multi-environment Helm charts.
 
 ## Architecture
 
@@ -404,7 +404,7 @@ graph LR
    - **AWS-Managed Add-ons**: `vpc-cni` (direct VPC IP allocation per pod), `coredns` (cluster DNS discovery), `kube-proxy` (node networking), and `aws-ebs-csi-driver` (dynamic storage provisioner).
    - **StorageClass (`gp3`)**: Configured with `volume_binding_mode = "WaitForFirstConsumer"` to ensure EBS volumes are created in the exact Availability Zone of the scheduled pod, with `allow_volume_expansion = true` and `reclaim_policy = "Retain"`. Powers persistent storage for **Elasticsearch (`10Gi`)**, **Prometheus TSDB (`10Gi`)**, and **Alertmanager (`5Gi`)**.
 4. **Automated GitOps Engine (ArgoCD via Helm):**
-   - Fully provisioned by Terraform. Automatically synchronizes `k8s/` manifests from GitHub into the `taskmanager` namespace with self-healing and auto-pruning.
+   - Fully provisioned by Terraform. Automatically synchronizes `charts/taskmanager` Helm charts from GitHub (`AdastraGupta/eks-gitops-platform`) into the `taskmanager` namespace with self-healing and auto-pruning.
 5. **Triple-Layer Alerting System (Microsoft Teams Webhook):**
    - **CI/CD Pipeline Alerts**: GitHub Actions emits Rich Adaptive Cards for Terraform Plan, Apply, and Destroy events.
    - **GitOps Alerts**: ArgoCD Notifications publishes real-time sync success, sync failure, and health degradation cards.
@@ -461,7 +461,7 @@ graph LR
 ## Project Structure
 
 ```
-├── k8s/                              # Raw Kubernetes manifests (synced by ArgoCD)
+├── k8s/                              # Raw Kubernetes manifests (reference templates)
 │   ├── namespace.yaml                # taskmanager namespace
 │   ├── secret.yaml                   # App secrets (RDS credentials, PGRST_DB_URI)
 │   ├── configmap.yaml                # PostgREST configuration (schema, anon role)
@@ -478,7 +478,7 @@ graph LR
 │   ├── ingress.yaml                  # Public Ingress (nginx-public: / → frontend, /api → backend)
 │   └── ingress-internal.yaml         # Internal Ingress (nginx-internal: /grafana, /kibana, /argocd, /jaeger)
 │
-├── charts/                           # Helm chart for multi-environment deployments
+├── charts/                           # Helm chart for multi-environment deployments (synced by ArgoCD & CI/CD)
 │   └── taskmanager/
 │       ├── Chart.yaml                # Chart metadata (name: taskmanager, version: 1.0.0)
 │       ├── values.yaml               # Base defaults shared across all environments
@@ -523,10 +523,14 @@ graph LR
 
 ## Quick Start
 
-### 1. Deploy Infrastructure
+### 1. Clone Repository & Deploy Infrastructure
 
 ```bash
-cd terraform
+# Clone the repository
+git clone https://github.com/AdastraGupta/eks-gitops-platform.git
+cd eks-gitops-platform/terraform
+
+# Initialize and apply Terraform
 terraform init
 terraform apply
 ```
@@ -591,7 +595,7 @@ kubectl run rds-init -n taskmanager --image=postgres:15-alpine --rm -i --restart
 ArgoCD is **100% automated via Helm** (`terraform/argocd.tf`). When `terraform apply` completes:
 1. ArgoCD Server & Controllers are running in the `argocd` namespace.
 2. MS Teams notifications are configured and subscribed to sync events.
-3. The `taskmanager` Application is auto-created and syncing the `k8s/` directory.
+3. The `taskmanager` Application is auto-created and syncing the `charts/taskmanager` directory.
 
 **Get the auto-generated admin password:**
 ```bash
@@ -611,7 +615,7 @@ kubectl port-forward svc/argocd-server 8080:80 -n argocd
 
 ### 6. Push Changes to GitHub to Sync
 
-Any changes committed and pushed to the `k8s/` directory on the `main` branch will be **automatically synced** by ArgoCD within ~3 minutes and send a notification card directly to Microsoft Teams.
+Any changes committed and pushed to the `charts/taskmanager/` directory on the `main` branch will be **automatically synced** by ArgoCD within ~3 minutes and send a notification card directly to Microsoft Teams.
 
 ## Accessing the Application
 
@@ -1071,7 +1075,30 @@ aws iam create-open-id-connect-provider \
   --client-id-list sts.amazonaws.com
 ```
 
-Create a trust policy and IAM role with the necessary permissions for EKS, RDS, VPC, CloudWatch, ECR, and Helm.
+Create a trust policy granting access to `repo:AdastraGupta/eks-gitops-platform:*` and an IAM role with the necessary permissions for EKS, RDS, VPC, CloudWatch, ECR, and Helm:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+        },
+        "StringLike": {
+          "token.actions.githubusercontent.com:sub": "repo:AdastraGupta/eks-gitops-platform:*"
+        }
+      }
+    }
+  ]
+}
+```
 
 #### 3. Configure GitHub Repository Settings
 

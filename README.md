@@ -1,4 +1,4 @@
-﻿# 3-Tier Task Manager — AWS EKS + GitOps
+# 3-Tier Task Manager — AWS EKS + GitOps
 
 A production-grade, cloud-native **3-tier task manager** application deployed on **AWS EKS** with a fully automated **GitOps** pipeline using ArgoCD.
 
@@ -11,7 +11,7 @@ The system is structured into **4 decoupled, secure tiers**: External Ingress & 
 ```mermaid
 graph TB
     User["🌐 User / Public Browser"]
-    GitHub["📦 GitHub Repository\n(AdastraGupta/3-tier-k8s-project · main)"]
+    GitHub["📦 GitHub Repository\n(AdastraGupta/eks-gitops-platform · main)"]
     Teams["📣 Microsoft Teams\n(CI/CD · GitOps · Alertmanager)"]
     DevOps["🔐 DevOps / SRE / VPN\n(Internal Tools Access)"]
 
@@ -1111,4 +1111,4 @@ terraform destroy
 
 ## Repository
 
-**GitHub**: [https://github.com/AdastraGupta/3-tier-k8s-project](https://github.com/AdastraGupta/3-tier-k8s-project)
+**GitHub**: [https://github.com/AdastraGupta/eks-gitops-platform](https://github.com/AdastraGupta/eks-gitops-platform)

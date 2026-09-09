@@ -274,7 +274,7 @@ resource "helm_release" "argocd" {
         }
 
         source = {
-          repoURL        = "https://github.com/AdastraGupta/3-tier-k8s-project.git"
+          repoURL        = "https://github.com/AdastraGupta/eks-gitops-platform.git"
           targetRevision = "main"
 
           # Points to Helm chart — NOT the old k8s/ raw manifests folder
@@ -291,8 +291,8 @@ resource "helm_release" "argocd" {
         }
 
         destination = {
-          server    = "https://kubernetes.default.svc"  # in-cluster ArgoCD (each cluster manages itself)
-          namespace = "taskmanager"                      # Same namespace name on every cluster
+          server    = "https://kubernetes.default.svc" # in-cluster ArgoCD (each cluster manages itself)
+          namespace = "taskmanager"                    # Same namespace name on every cluster
         }
 
         syncPolicy = {

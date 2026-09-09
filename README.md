@@ -1,4 +1,4 @@
-# 3-Tier Task Manager — AWS EKS + GitOps
+﻿# 3-Tier Task Manager — AWS EKS + GitOps
 
 A production-grade, cloud-native **3-tier task manager** application deployed on **AWS EKS** with a fully automated **GitOps** pipeline using ArgoCD.
 
@@ -18,7 +18,7 @@ graph TB
     subgraph "AWS Cloud — us-east-1"
 
         subgraph "Dual Load Balancer Layer"
-            PUB_NLB["☁️ Public AWS NLB\n(nginx-public · internet-facing)\n→ Public App Traffic"]
+            PUB_NLB["☁️ Public AWS NLB\n(nginx-public · internet-facing)\n→ Public App Traffic (HTTPS via ACM)"]
             INT_NLB["🔒 Internal AWS NLB\n(nginx-internal · VPC-only CIDR)\n→ Internal Observability & GitOps"]
         end
 
@@ -106,13 +106,16 @@ graph TB
 
             subgraph "Karpenter Dynamic Node Pool (AWS EC2 Fleet)"
                 KP_CTRL["🚀 Karpenter Controller\n(kube-system · 2 replicas · IRSA)\nProvisions EC2 in < 45 seconds"]
-                KP_NP["NodePool: app-nodepool\n(Spot→On-Demand fallback)\nt3/c6i/m6i · 100 vCPU limit"]
+                KP_NP["NodePool: app-nodepool\n(Spot→On-Demand fallback)\nt3/c6i/m6i · AL2023 AMI · 100 vCPU limit"]
                 KP_INTR["📬 SQS Interruption Queue\n+ 3× EventBridge Rules\n(2-min Spot warning handler)"]
             end
         end
 
         subgraph "AWS Managed Services"
             RDS["🗄️ AWS RDS PostgreSQL 15\n(db.t4g.micro · Single-AZ)\nDB: taskdb · port 5432 · sslmode=require"]
+            ECR["📦 AWS ECR\n(taskmanager-frontend · taskmanager-backend)\nImage registry for CI/CD builds"]
+            R53["🌐 Route 53 Hosted Zone\n(DNS ALIAS A-Record → Public NLB)"]
+            ACM["🔒 AWS Certificate Manager\n(ACM SSL/TLS · DNS validation)\ntasks.yourdomain.com"]
             CWLogs["CloudWatch Logs\n(/aws/containerinsights/prometheus)\n(/aws/containerinsights/performance)"]
             CWDash["CloudWatch Dashboard & Alarms\n(taskmanager-cluster-observability)\nAlarms: RDS CPU > 80% · Storage < 2 GB"]
             Bedrock["🧠 AWS Bedrock\n(Anthropic Claude 3 Haiku)\nModel: claude-3-haiku-20240307-v1:0"]
@@ -126,10 +129,12 @@ graph TB
     ArgoCD -->|"auto-sync manifests"| BS
     ArgoCD --> ArgoNotif
     ArgoNotif -->|"Sync / Health Alerts (Webhook)"| Teams
-    GitHub -.->|"CI/CD Plan / Apply / Destroy Alerts"| Teams
+    GitHub -..->|"CI/CD Plan / Apply / Destroy Alerts"| Teams
 
-    %% 🌐 PUBLIC TRAFFIC FLOW: User → Public NLB → nginx-public Controller → Ingress Rules → Frontend/Backend
-    User -->|"HTTP :80 (Public Internet)"| PUB_NLB
+    %% PUBLIC TRAFFIC FLOW
+    User -->|"HTTPS :443 (tasks.domain.com)"| R53
+    R53 -->|"ALIAS A-Record"| PUB_NLB
+    ACM -..->|"TLS termination"| PUB_NLB
     PUB_NLB --> ING_PUB
     ING_PUB --> TM_ING
     TM_ING -->|"Path: / (Frontend UI)"| FS
@@ -137,7 +142,7 @@ graph TB
     FS --> FD
     BS --> BD
 
-    %% 🔒 INTERNAL TRAFFIC FLOW: DevOps → Internal NLB → nginx-internal → ExternalName Proxies → Target Tools
+    %% INTERNAL TRAFFIC FLOW
     DevOps -->|"VPN / SSM / Port-Forward"| INT_NLB
     INT_NLB --> ING_INT
     ING_INT --> INT_ING
@@ -150,77 +155,63 @@ graph TB
     EXT_ARGO -->|"argocd-server:80"| ArgoCD
     EXT_JAEGER -->|"jaeger-query:16686"| JAEGER_Q
 
-    %% Application Backend → Database
     BD -->|"PGRST_DB_URI (Port 5432)"| PS
     PS -->|"ExternalName DNS"| RDS
 
-    %% Configuration & Secrets Injection
-    CM -.->|"Environment variables"| FD
-    CM -.->|"Environment variables"| BD
+    CM -..->|"Environment variables"| FD
+    CM -..->|"Environment variables"| BD
 
-    %% EKS Add-ons & Dynamic Storage Provisioning Flow
     EBS_CSI -->|"powers provisioner"| SC_GP3
-    SC_GP3 -.->|"10Gi PVC dynamic volume"| PROM
-    SC_GP3 -.->|"5Gi PVC dynamic volume"| ALERT
-    SC_GP3 -.->|"10Gi PVC dynamic volume"| ES
+    SC_GP3 -..->|"10Gi PVC dynamic volume"| PROM
+    SC_GP3 -..->|"5Gi PVC dynamic volume"| ALERT
+    SC_GP3 -..->|"10Gi PVC dynamic volume"| ES
 
-    %% Prometheus Metrics Collection & Alerting
-    NE -.->|"Node hardware metrics"| PROM
-    KSM -.->|"Kubernetes object states"| PROM
-    BD -.->|"PostgREST metrics (/metrics)"| PROM
-    FD -.->|"Container metrics"| PROM
+    NE -..->|"Node hardware metrics"| PROM
+    KSM -..->|"Kubernetes object states"| PROM
+    BD -..->|"PostgREST metrics (/metrics)"| PROM
+    FD -..->|"Container metrics"| PROM
     PROM -->|"PromQL query API"| GRAF
     PROM -->|"Alerting rules evaluation"| ALERT
     ALERT -->|"Firing / Resolved alerts (Webhook)"| Teams
 
-    %% Distributed Tracing (Jaeger) — component connections
-    JAEGER_A -.->|"batches spans"| JAEGER_C
+    JAEGER_A -..->|"batches spans"| JAEGER_C
     JAEGER_C -->|"Bulk writes traces (ES Index API)"| ES
     JAEGER_Q -->|"Reads trace data (ES Search API)"| ES
 
-    %% AWS CloudWatch Embedded Metric Format (EMF)
-    BD -.-|"Prometheus /metrics"| CWAgent
+    BD -..->|"Prometheus /metrics"| CWAgent
     CWAgent -->|"EMF Structured Logs"| CWLogs
     CWLogs --> CWDash
 
-    %% Centralized Logging (EFK)
-    FD -.-|"stdout / stderr"| FB
-    BD -.-|"stdout / stderr"| FB
+    FD -..->|"stdout / stderr"| FB
+    BD -..->|"stdout / stderr"| FB
     FB -->|"HTTP Bulk Ingestion"| ES
     ES -->|"Search & Query API"| KB
 
-    %% AI SRE Incident Triage (K8sGPT + AWS Bedrock)
-    FD -.->|"Failure logs / CrashEvents"| K8SGPT
-    BD -.->|"Failure logs / CrashEvents"| K8SGPT
+    FD -..->|"Failure logs / CrashEvents"| K8SGPT
+    BD -..->|"Failure logs / CrashEvents"| K8SGPT
     K8SGPT -->|"bedrock:InvokeModel (IRSA)"| Bedrock
     Bedrock -->|"AI Root Cause & Fix Commands"| K8SGPT
     K8SGPT -->|"AI Incident Diagnosis (Webhook)"| Teams
 
-    %% Full-Stack Autoscaling (KEDA + HPA + Karpenter)
-    PROM -.->|"PromQL req/min metric"| KEDA_CTRL
-    KEDA_CTRL -.->|"Drives HPA replica count"| BE_SO
-    METRICS_SRV -.->|"CPU/Mem telemetry"| FE_HPA
-    METRICS_SRV -.->|"CPU/Mem telemetry"| BE_SO
-    BE_SO -.->|"Scales 2→15 pods"| BD
-    FE_HPA -.->|"Scales 3→10 pods"| FD
-    BE_PDB -.->|"Guards during drain"| BD
-    FE_PDB -.->|"Guards during drain"| FD
-    BD -.->|"Pending pods trigger"| KP_CTRL
-    FD -.->|"Pending pods trigger"| KP_CTRL
+    PROM -..->|"PromQL req/min metric"| KEDA_CTRL
+    KEDA_CTRL -..->|"Drives HPA replica count"| BE_SO
+    METRICS_SRV -..->|"CPU/Mem telemetry"| FE_HPA
+    METRICS_SRV -..->|"CPU/Mem telemetry"| BE_SO
+    BE_SO -..->|"Scales 2→15 pods"| BD
+    FE_HPA -..->|"Scales 3→10 pods"| FD
+    BE_PDB -..->|"Guards during drain"| BD
+    FE_PDB -..->|"Guards during drain"| FD
+    BD -..->|"Pending pods trigger"| KP_CTRL
+    FD -..->|"Pending pods trigger"| KP_CTRL
     KP_CTRL -->|"EC2 Fleet API (< 45s)"| KP_NP
-    KP_INTR -.->|"Spot 2-min warning"| KP_CTRL
+    KP_INTR -..->|"Spot 2-min warning"| KP_CTRL
 
-    %% Styles — External Actors
     style User fill:#4FC3F7,stroke:#0277BD,color:#000
     style DevOps fill:#7B68EE,stroke:#4B0082,color:#fff
     style GitHub fill:#24292E,stroke:#586069,color:#fff
     style Teams fill:#6264A7,stroke:#464775,color:#fff
-
-    %% Styles — Load Balancers
     style PUB_NLB fill:#FF9900,stroke:#232F3E,color:#000
     style INT_NLB fill:#5C6BC0,stroke:#283593,color:#fff
-
-    %% Styles — Ingress Controllers & Proxies
     style ING_PUB fill:#326CE5,stroke:#1A4DB5,color:#fff
     style ING_INT fill:#283593,stroke:#1A237E,color:#fff
     style INT_ING fill:#3F51B5,stroke:#1A237E,color:#fff
@@ -228,12 +219,8 @@ graph TB
     style EXT_KB fill:#CE93D8,stroke:#6A1B9A,color:#000
     style EXT_ARGO fill:#CE93D8,stroke:#6A1B9A,color:#000
     style EXT_JAEGER fill:#CE93D8,stroke:#6A1B9A,color:#000
-
-    %% Styles — ArgoCD GitOps
     style ArgoCD fill:#EF7B4D,stroke:#C04A1A,color:#fff
     style ArgoNotif fill:#F4A261,stroke:#C04A1A,color:#000
-
-    %% Styles — App Workloads
     style TM_ING fill:#326CE5,stroke:#1A4DB5,color:#fff
     style FD fill:#66BB6A,stroke:#2E7D32,color:#000
     style FS fill:#A5D6A7,stroke:#2E7D32,color:#000
@@ -242,15 +229,11 @@ graph TB
     style PS fill:#CE93D8,stroke:#6A1B9A,color:#000
     style CM fill:#78909C,stroke:#37474F,color:#fff
     style RDS fill:#EF5350,stroke:#B71C1C,color:#fff
-
-    %% Styles — EKS Add-ons & Storage
     style VPC_CNI fill:#00897B,stroke:#004D40,color:#fff
     style COREDNS fill:#00897B,stroke:#004D40,color:#fff
     style KPROXY fill:#00897B,stroke:#004D40,color:#fff
     style EBS_CSI fill:#00897B,stroke:#004D40,color:#fff
     style SC_GP3 fill:#8E24AA,stroke:#4A148C,color:#fff
-
-    %% Styles — Observability, Monitoring & Tracing
     style PROM fill:#E6522C,stroke:#B13A1E,color:#fff
     style GRAF fill:#F5A623,stroke:#C07D10,color:#000
     style ALERT fill:#D63B25,stroke:#9B2A1C,color:#fff
@@ -259,20 +242,14 @@ graph TB
     style JAEGER_Q fill:#60D0E4,stroke:#2BA0B5,color:#000
     style JAEGER_C fill:#4DB6C8,stroke:#2BA0B5,color:#000
     style JAEGER_A fill:#80DEEA,stroke:#2BA0B5,color:#000
-
-    %% Styles — CloudWatch & Bedrock
     style CWAgent fill:#FF9900,stroke:#232F3E,color:#fff
     style CWLogs fill:#FFE0B2,stroke:#E65100,color:#000
     style CWDash fill:#FF9900,stroke:#232F3E,color:#000
     style Bedrock fill:#FF9900,stroke:#232F3E,color:#000
-
-    %% Styles — Centralized Logging & AI SRE
     style ES fill:#005571,stroke:#003A4D,color:#fff
     style FB fill:#49BDA5,stroke:#2D8F7B,color:#000
     style KB fill:#E8478B,stroke:#C12D6B,color:#fff
     style K8SGPT fill:#9C27B0,stroke:#6A1B9A,color:#fff
-
-    %% Styles — Full-Stack Autoscaling (KEDA + HPA + Karpenter)
     style KEDA_CTRL fill:#FF6F00,stroke:#E65100,color:#fff
     style METRICS_SRV fill:#FFA726,stroke:#E65100,color:#000
     style KP_CTRL fill:#1565C0,stroke:#0D47A1,color:#fff
@@ -282,16 +259,18 @@ graph TB
     style FE_PDB fill:#C8E6C9,stroke:#2E7D32,color:#000
     style BE_SO fill:#FFCC80,stroke:#E65100,color:#000
     style BE_PDB fill:#FFE0B2,stroke:#E65100,color:#000
+    style R53 fill:#8D6E63,stroke:#4E342E,color:#fff
+    style ACM fill:#66BB6A,stroke:#2E7D32,color:#000
+    style ECR fill:#FF9900,stroke:#232F3E,color:#000
 ```
 
 ### Detailed Domain Workflows
 
-To make each subsystem easy to navigate, here are the **3 isolated data-flow diagrams**:
-
 #### 🌐 1. Application & Dual Ingress Traffic Flow
 ```mermaid
 graph LR
-    User["🌐 Public User"] -->|"HTTP :80"| PUB_NLB["AWS Public NLB"]
+    User["🌐 Public User"] -->|"HTTPS :443\ntasks.domain.com"| R53["Route 53 ALIAS"]
+    R53 --> PUB_NLB["AWS Public NLB\n(ACM TLS Terminated)"]
     PUB_NLB --> ING_PUB["nginx-public Ingress"]
     ING_PUB -->|"/"| FE["Frontend (Nginx UI)\n[3–10 Replicas]"]
     ING_PUB -->|"/api"| BE["Backend (PostgREST API)\n[2–15 Replicas]"]
@@ -311,6 +290,7 @@ graph LR
     style FE fill:#66BB6A,stroke:#2E7D32,color:#000
     style BE fill:#FFA726,stroke:#E65100,color:#000
     style RDS fill:#EF5350,stroke:#B71C1C,color:#fff
+    style R53 fill:#8D6E63,stroke:#4E342E,color:#fff
 ```
 
 #### ⚡ 2. Full-Stack Autoscaling & Node Provisioning Flow
@@ -322,18 +302,18 @@ graph LR
     end
 
     subgraph Pod_Scaling["2. Pod Autoscalers"]
-        KEDA["KEDA ScaledObject\n(backend 2➔15 pods)"]
-        HPA["Kubernetes HPA\n(frontend 3➔10 pods)"]
+        KEDA["KEDA ScaledObject\n(backend 2→15 pods)"]
+        HPA["Kubernetes HPA\n(frontend 3→10 pods)"]
     end
 
     subgraph Node_Provisioning["3. Node Provisioning (<45s)"]
         KP["Karpenter Controller\n(Watches Pending Pods)"]
-        FLEET["AWS EC2 Fleet API\n(Spot Nodes: t3/c6i/m6i)"]
+        FLEET["AWS EC2 Fleet API\n(Spot Nodes: t3/c6i/m6i · AL2023)"]
     end
 
     PROM --> KEDA -->|"Scale Backend"| APP_PODS["Application Pods"]
     METRICS --> HPA -->|"Scale Frontend"| APP_PODS
-    APP_PODS -.->|"Pending when full"| KP --> FLEET -->|"Attaches Nodes"| APP_PODS
+    APP_PODS -..->|"Pending when full"| KP --> FLEET -->|"Attaches Nodes"| APP_PODS
 
     style PROM fill:#E6522C,stroke:#B13A1E,color:#fff
     style METRICS fill:#FFA726,stroke:#E65100,color:#000
@@ -352,7 +332,7 @@ graph LR
 
     subgraph Observability_Engines["Observability & Diagnostics"]
         PROM["Prometheus 2.53\n(Metrics TSDB)"]
-        FB["Fluent Bit ➔ ES\n(Centralized Logs)"]
+        FB["Fluent Bit → ES\n(Centralized Logs)"]
         JG["Jaeger Collector\n(Distributed Traces)"]
         K8SGPT["K8sGPT Operator\n(AI Diagnostics)"]
     end
@@ -362,12 +342,12 @@ graph LR
         TEAMS["Microsoft Teams\n(Adaptive Incident Cards)"]
     end
 
-    PODS -.->|"Scrape /metrics"| PROM
-    PODS -.->|"stdout / stderr"| FB
-    PODS -.->|"OTLP Spans"| JG
-    PODS -.->|"Crash & Error Events"| K8SGPT -->|"IRSA Invoke"| BEDROCK --> K8SGPT
+    PODS -..->|"Scrape /metrics"| PROM
+    PODS -..->|"stdout / stderr"| FB
+    PODS -..->|"OTLP Spans"| JG
+    PODS -..->|"Crash & Error Events"| K8SGPT -->|"IRSA Invoke"| BEDROCK --> K8SGPT
 
-    PROM & K8SGPT -.->|"Webhooks"| TEAMS
+    PROM & K8SGPT -..->|"Webhooks"| TEAMS
 
     style PODS fill:#66BB6A,stroke:#2E7D32,color:#000
     style PROM fill:#E6522C,stroke:#B13A1E,color:#fff
@@ -378,70 +358,110 @@ graph LR
     style TEAMS fill:#5C6BC0,stroke:#283593,color:#fff
 ```
 
+#### 🚀 4. Multi-Environment CI/CD Deployment Flow
+```mermaid
+graph LR
+    subgraph Trigger["Trigger"]
+        PUSH["Push to main\n(charts/**)"]
+        DISPATCH["workflow_dispatch\n(manual tag / env)"]
+    end
+
+    subgraph Build["1. Build & Push"]
+        BUILD["🐳 Build & Push ECR Images\n(sha-<commit> tag)"]
+        LINT["🔍 Helm Lint\nAll 3 environments"]
+    end
+
+    subgraph Envs["2. Sequential Deployment"]
+        DEV["🟡 Deploy → DEV\n(values-dev.yaml)"]
+        SMOKE["Dev Smoke Test\n(curl /api/health)"]
+        STAGING["🟠 Deploy → STAGING\n(values-staging.yaml)"]
+        INTTEST["Integration Tests\n(curl /api/health)"]
+        APPROVAL["⏸️ Manual Approval\n(GitHub Environment Gate)"]
+        PROD["🔴 Deploy → PRODUCTION\n(values-prod.yaml)"]
+    end
+
+    PUSH & DISPATCH --> BUILD --> LINT
+    LINT --> DEV --> SMOKE --> STAGING --> INTTEST --> APPROVAL --> PROD
+
+    style BUILD fill:#0288D1,stroke:#01579B,color:#fff
+    style DEV fill:#F9A825,stroke:#F57F17,color:#000
+    style STAGING fill:#EF6C00,stroke:#E65100,color:#fff
+    style PROD fill:#C62828,stroke:#B71C1C,color:#fff
+    style APPROVAL fill:#6A1B9A,stroke:#4A148C,color:#fff
+```
+
 ---
 
 ### Architecture Highlights
 
 1. **Dual Ingress Segmentation & Cross-Namespace `ExternalName` Proxies:**
-   - **Public NLB (`nginx-public`)**: Internet-facing load balancer serving the Frontend UI (`/`) and PostgREST backend API (`/api`).
+   - **Public NLB (`nginx-public`)**: Internet-facing load balancer serving the Frontend UI (`/`) and PostgREST backend API (`/api`). TLS terminated at the NLB via ACM certificate when `ssl_enabled = true`.
    - **Internal NLB (`nginx-internal`)**: Private VPC load balancer serving **Grafana** (`/grafana`), **Kibana** (`/kibana`), **ArgoCD** (`/argocd`), and **Jaeger** (`/jaeger`).
    - **Cross-Namespace ExternalName Services**: Ingress rules in `ingress-nginx` route through dedicated `ExternalName` proxy services (`grafana-external`, `kibana-external`, `argocd-external`, `jaeger-external`) that resolve target service FQDNs across namespaces (`monitoring`, `logging`, `argocd`, `tracing`).
-2. **EKS Core Add-ons & Dynamic `gp3` Storage Layer:**
+2. **Automated HTTPS via ACM + Route 53 (`ssl.tf`):**
+   - Terraform automatically provisions a **Route 53 Hosted Zone**, requests a free **AWS Certificate Manager (ACM)** TLS certificate, inserts DNS CNAME validation records, and creates a Route 53 **ALIAS A-Record** pointing `tasks.yourdomain.com → Public NLB`. TLS is terminated at the NLB layer for zero pod overhead. Controlled by `ssl_enabled` variable.
+3. **EKS Core Add-ons & Dynamic `gp3` Storage Layer:**
    - **AWS-Managed Add-ons**: `vpc-cni` (direct VPC IP allocation per pod), `coredns` (cluster DNS discovery), `kube-proxy` (node networking), and `aws-ebs-csi-driver` (dynamic storage provisioner).
    - **StorageClass (`gp3`)**: Configured with `volume_binding_mode = "WaitForFirstConsumer"` to ensure EBS volumes are created in the exact Availability Zone of the scheduled pod, with `allow_volume_expansion = true` and `reclaim_policy = "Retain"`. Powers persistent storage for **Elasticsearch (`10Gi`)**, **Prometheus TSDB (`10Gi`)**, and **Alertmanager (`5Gi`)**.
-3. **Automated GitOps Engine (ArgoCD via Helm):**
+4. **Automated GitOps Engine (ArgoCD via Helm):**
    - Fully provisioned by Terraform. Automatically synchronizes `k8s/` manifests from GitHub into the `taskmanager` namespace with self-healing and auto-pruning.
-4. **Triple-Layer Alerting System (Microsoft Teams Webhook):**
+5. **Triple-Layer Alerting System (Microsoft Teams Webhook):**
    - **CI/CD Pipeline Alerts**: GitHub Actions emits Rich Adaptive Cards for Terraform Plan, Apply, and Destroy events.
    - **GitOps Alerts**: ArgoCD Notifications publishes real-time sync success, sync failure, and health degradation cards.
    - **Infrastructure / Metric Alerts**: Alertmanager routes Prometheus alert rule evaluations (pod crashes, replica mismatches, node pressure) directly to Teams.
-5. **Complete 3-Pillar Observability Stack (Metrics, Logs, Traces):**
+6. **Complete 3-Pillar Observability Stack (Metrics, Logs, Traces):**
    - **Metrics (Prometheus & Grafana)**: Time-series metrics across nodes, Kubernetes objects, and PostgREST endpoints with persistent EBS `gp3` TSDB storage.
    - **Logs (EFK Stack)**: Distributed log aggregation via Fluent Bit DaemonSets into Elasticsearch with visualization in Kibana.
    - **Traces (Jaeger)**: End-to-end distributed tracing via three distinct workloads — **Jaeger Collector** (`Deployment`, ingests OTLP spans on ports 4317/4318), **Jaeger Query UI** (`Deployment`, serves the `/jaeger` dashboard at port 16686), and **Jaeger Agent** (`DaemonSet`, per-node batcher routing spans to the Collector). All traces are persisted in Elasticsearch (not in Jaeger itself), so Jaeger components are fully stateless and do NOT require PersistentVolumes.
    - **AWS CloudWatch Container Insights**: Embedded Metric Format (EMF) scraping for cloud-native metrics and alarms.
-6. **AI-Powered SRE Automation (K8sGPT + AWS Bedrock):**
+7. **AI-Powered SRE Automation (K8sGPT + AWS Bedrock):**
    - Autonomous Kubernetes failure detection across pods, deployments, services, ingress, PVCs, and nodes.
    - Leverages **AWS Bedrock (Anthropic Claude 3 Haiku)** via **IAM Roles for Service Accounts (IRSA)** for passwordless, zero-secret authentication, delivering plain-English root causes and remediation `kubectl` commands directly to Microsoft Teams.
-7. **Dual Managed Node Groups (Workload Isolation & Spot Cost Optimization):**
-   - **`system_nodes`** (`ON_DEMAND`, 2× `t3.medium`): High-reliability node group hosting Ingress controllers, ArgoCD, Prometheus, Grafana, Alertmanager, Elasticsearch, Kibana, Jaeger, K8sGPT Operator, KEDA Controller, and the Karpenter controller itself.
-   - **`app_nodes` → Karpenter `NodePool`**: Cost-optimized dynamic compute pool for `taskmanager` application workloads. Karpenter provisions right-sized Spot instances (with On-Demand fallback) from families `t3`, `t3a`, `c6i`, `m6i` within 45 seconds when pods become `Pending`; auto-consolidates and terminates idle nodes.
-8. **Full-Stack Autoscaling Engine (KEDA + HPA + Karpenter):**
+8. **Dual Managed Node Groups (Workload Isolation & Spot Cost Optimization):**
+   - **`system_nodes`** (`ON_DEMAND`, 2x `t3.medium`): High-reliability node group hosting Ingress controllers, ArgoCD, Prometheus, Grafana, Alertmanager, Elasticsearch, Kibana, Jaeger, K8sGPT Operator, KEDA Controller, and the Karpenter controller itself.
+   - **`app_nodes` → Karpenter `NodePool`**: Cost-optimized dynamic compute pool for `taskmanager` application workloads. Karpenter provisions right-sized Spot instances (with On-Demand fallback) from families `t3`, `t3a`, `c6i`, `m6i` using **Amazon Linux 2023 (AL2023)** AMI within 45 seconds when pods become `Pending`; auto-consolidates and terminates idle nodes.
+9. **Full-Stack Autoscaling Engine (KEDA + HPA + Karpenter):**
    - **Pod-Level — KEDA (Event-Driven)**: `ScaledObject` on the backend drives HPA scaling from **2 → 15 replicas** based on dual triggers: Prometheus PostgREST request rate (`> 50 req/min per pod`) and CPU utilization (`> 70%`).
    - **Pod-Level — HPA (Resource-Based)**: Standard Kubernetes HPA scales frontend from **3 → 10 replicas** on CPU (`> 75%`) and Memory (`> 80%`); powered by Kubernetes Metrics Server.
    - **Node-Level — Karpenter**: Automatically provisions EC2 Spot/On-Demand nodes from AWS EC2 Fleet API in **< 45 seconds** when scaling pods are `Pending`. Handles Spot interruption warnings (2-minute SQS/EventBridge signal) with graceful node draining. Consolidates underutilized nodes after 30 seconds idle.
    - **Resilience — PodDisruptionBudgets (PDBs)**: Guarantee `minAvailable: 2` for frontend and `minAvailable: 1` for backend during any Karpenter node consolidation or EC2 reclaim, ensuring zero user-facing downtime.
+10. **Multi-Environment Helm Chart (`charts/taskmanager`):**
+    - A single parameterized Helm chart with environment-specific values files (`values-dev.yaml`, `values-staging.yaml`, `values-prod.yaml`) that override replica counts, resource requests, image tags, autoscaling settings, TLS configuration, and Karpenter instance types per environment.
 
 ## Tech Stack
 
 | Layer | Technology |
 |---|---|
-| **Container Orchestration** | AWS EKS 1.30 (`system_nodes` [ON_DEMAND `t3.medium`] + Karpenter Dynamic NodePool [Spot `t3/c6i/m6i`]) |
+| **Container Orchestration** | AWS EKS 1.30 (`system_nodes` [ON_DEMAND `t3.medium`] + Karpenter Dynamic NodePool [Spot `t3/c6i/m6i` · AL2023 AMI]) |
 | **EKS Managed Add-ons** | `vpc-cni`, `coredns`, `kube-proxy`, `aws-ebs-csi-driver` |
 | **Persistent Storage** | Kubernetes `gp3` StorageClass (`WaitForFirstConsumer`, EBS CSI provisioner) |
-| **Frontend** | Nginx serving static HTML/CSS/JS |
-| **Backend API** | [PostgREST](https://postgrest.org/) v12.2.3 — auto-generates REST API from PostgreSQL schema |
+| **Frontend** | Nginx serving static HTML/CSS/JS (ECR image: `taskmanager-frontend`) |
+| **Backend API** | [PostgREST](https://postgrest.org/) v12.2.3 — auto-generates REST API from PostgreSQL schema (ECR image: `taskmanager-backend`) |
 | **Database** | AWS RDS PostgreSQL 15 (`db.t4g.micro`, Single-AZ) |
 | **GitOps** | ArgoCD v2.12 — Helm-managed, fully automated via `terraform apply` |
-| **CI/CD** | GitHub Actions — Terraform plan/apply pipeline with OIDC authentication |
-| **Ingress** | Dual Nginx Ingress Controllers — `nginx-public` (internet) + `nginx-internal` (VPC-only) |
+| **CI/CD — Infrastructure** | GitHub Actions (`terraform.yml`) — Terraform plan/apply pipeline with OIDC authentication |
+| **CI/CD — Application** | GitHub Actions (`deploy.yml`) — Build & push ECR images, sequential Helm deploy: Dev → Staging → Production with smoke/integration tests and manual approval gate |
+| **Container Registry** | AWS ECR (`taskmanager-frontend`, `taskmanager-backend`) — OIDC-authenticated pushes from GitHub Actions |
+| **Helm Chart** | `charts/taskmanager` (v1.0.0) — multi-environment values: `values-dev.yaml`, `values-staging.yaml`, `values-prod.yaml` |
+| **Ingress** | Dual Nginx Ingress Controllers — `nginx-public` (internet, v4.10.1) + `nginx-internal` (VPC-only, v4.10.1) |
+| **SSL / TLS** | AWS Certificate Manager (ACM) + Route 53 — automated DNS validation, ALIAS A-record, NLB TLS termination (controlled by `ssl_enabled`) |
 | **Event-Driven Pod Autoscaling** | KEDA v2.15 — Prometheus request-rate + CPU triggers on backend (`ScaledObject`, min:2 → max:15) |
 | **Resource-Based Pod Autoscaling** | Kubernetes HPA v2 — CPU/Memory triggers on frontend (min:3 → max:10) via Metrics Server |
-| **Node Autoscaling** | Karpenter v1.0.8 — just-in-time EC2 Spot/On-Demand provisioning (< 45s), Spot interruption via SQS + EventBridge, node consolidation |
+| **Node Autoscaling** | Karpenter v1.0.8 — just-in-time EC2 Spot/On-Demand provisioning (< 45s), AL2023 AMI, Spot interruption via SQS + EventBridge, node consolidation |
 | **Resilience** | PodDisruptionBudgets — `minAvailable: 2` (frontend) + `minAvailable: 1` (backend) |
 | **Metrics & Monitoring** | Prometheus 2.53 + Grafana 11.1 via `kube-prometheus-stack` (Helm-managed) |
-| **Distributed Tracing** | Jaeger 3.0 via `jaegertracing/jaeger` — Collector, Query UI, Agent (`DaemonSet`); traces stored in Elasticsearch |
+| **Distributed Tracing** | Jaeger 3.0 via `jaegertracing/jaeger` (chart v3.0.12) — Collector, Query UI, Agent (`DaemonSet`); traces stored in Elasticsearch |
 | **Alerting** | Alertmanager (MS Teams webhook routing) + AWS CloudWatch Alarms |
 | **Observability (AWS)** | AWS CloudWatch (Dashboard + Container Insights + Metric Alarms) |
 | **Centralized Logging** | EFK Stack — Elasticsearch 8.15, Fluent Bit 3.1, Kibana 8.15 (Helm-managed via Terraform) |
 | **AI SRE / AIOps** | K8sGPT Operator 0.2.2 + AWS Bedrock (Anthropic Claude 3 Haiku via IRSA) |
-| **Infrastructure as Code** | Terraform (S3 backend + DynamoDB state locking) |
+| **Infrastructure as Code** | Terraform >= 1.6.0 (S3 backend + DynamoDB state locking) |
 
 
 ## Project Structure
 
 ```
-├── k8s/                              # Kubernetes manifests (synced by ArgoCD)
+├── k8s/                              # Raw Kubernetes manifests (synced by ArgoCD)
 │   ├── namespace.yaml                # taskmanager namespace
 │   ├── secret.yaml                   # App secrets (RDS credentials, PGRST_DB_URI)
 │   ├── configmap.yaml                # PostgREST configuration (schema, anon role)
@@ -454,37 +474,52 @@ graph LR
 │   ├── backend-scaledobject.yaml     # KEDA ScaledObject: Prometheus req/min + CPU → scales backend 2→15 pods
 │   ├── pdb.yaml                      # PodDisruptionBudgets (frontend minAvail:2 + backend minAvail:1)
 │   ├── postgres-service.yaml         # type: ExternalName → AWS RDS endpoint
-│   ├── karpenter-nodepool.yaml       # Karpenter EC2NodeClass + NodePool (Spot→On-Demand, auto-consolidation)
+│   ├── karpenter-nodepool.yaml       # Karpenter EC2NodeClass (AL2023) + NodePool (Spot→On-Demand, auto-consolidation)
 │   ├── ingress.yaml                  # Public Ingress (nginx-public: / → frontend, /api → backend)
 │   └── ingress-internal.yaml         # Internal Ingress (nginx-internal: /grafana, /kibana, /argocd, /jaeger)
 │
-└── terraform/                        # Infrastructure as Code
-    ├── provider.tf                   # AWS + Kubernetes + Helm + Random provider config
-    ├── variables.tf                  # All configurable inputs (EFK, Monitoring, ArgoCD, Tracing, Karpenter, KEDA vars)
-    ├── vpc.tf                        # VPC, public/private subnets, NAT Gateway
-    ├── eks.tf                        # EKS cluster + system_nodes (ON_DEMAND) + EBS CSI IRSA
-    ├── rds.tf                        # RDS PostgreSQL instance + subnet/security groups
-    ├── cloudwatch.tf                 # CloudWatch Log Groups, Dashboard, Metric Alarms
-    ├── ingress.tf                    # Dual Nginx Ingress Controllers (nginx-public + nginx-internal)
-    ├── efk.tf                        # EFK logging stack (Helm: ES + Fluent Bit + Kibana)
-    ├── monitoring.tf                 # Prometheus + Grafana stack (Helm: kube-prometheus-stack)
-    ├── tracing.tf                    # Jaeger distributed tracing stack (Helm: jaegertracing/jaeger)
-    ├── argocd.tf                     # ArgoCD GitOps controller (Helm: argo/argo-cd)
-    ├── k8sgpt.tf                     # K8sGPT Operator (AI-powered SRE via AWS Bedrock + IRSA)
-    ├── karpenter.tf                  # Karpenter: IRSA + Node IAM Role + SQS queue + EventBridge + Helm
-    ├── keda.tf                       # KEDA Controller + Kubernetes Metrics Server (Helm)
-    └── outputs.tf                    # Key outputs (endpoints, commands, passwords)
+├── charts/                           # Helm chart for multi-environment deployments
+│   └── taskmanager/
+│       ├── Chart.yaml                # Chart metadata (name: taskmanager, version: 1.0.0)
+│       ├── values.yaml               # Base defaults shared across all environments
+│       ├── values-dev.yaml           # DEV overrides: single replicas, burstable images, dev RDS
+│       ├── values-staging.yaml       # STAGING overrides: 2 replicas, staging RDS, integration TLS
+│       ├── values-prod.yaml          # PROD overrides: 3+ replicas, HPA + KEDA, On-Demand Karpenter, ACM TLS
+│       └── templates/                # Helm templates (deployment, service, ingress, HPA, KEDA, PDB, etc.)
+│
+├── terraform/                        # Infrastructure as Code
+│   ├── provider.tf                   # AWS + Kubernetes + Helm + Random provider config (requires >= 1.6.0)
+│   ├── variables.tf                  # All configurable inputs (EFK, Monitoring, ArgoCD, Tracing, SSL, Karpenter, KEDA vars)
+│   ├── vpc.tf                        # VPC, public/private subnets, NAT Gateway
+│   ├── eks.tf                        # EKS cluster + system_nodes (ON_DEMAND) + EBS CSI IRSA
+│   ├── rds.tf                        # RDS PostgreSQL instance + subnet/security groups
+│   ├── secret.tf                     # Kubernetes Secret (app-secret) created by Terraform — DB credentials injected into pods
+│   ├── ssl.tf                        # HTTPS automation: Route 53 Hosted Zone + ACM certificate + DNS validation + NLB ALIAS record
+│   ├── cloudwatch.tf                 # CloudWatch Log Groups, Dashboard, Metric Alarms
+│   ├── ingress.tf                    # Dual Nginx Ingress Controllers (nginx-public v4.10.1 + nginx-internal v4.10.1)
+│   ├── efk.tf                        # EFK logging stack (Helm: ES + Fluent Bit + Kibana)
+│   ├── monitoring.tf                 # Prometheus + Grafana stack (Helm: kube-prometheus-stack)
+│   ├── tracing.tf                    # Jaeger distributed tracing stack (Helm: jaegertracing/jaeger v3.0.12)
+│   ├── argocd.tf                     # ArgoCD GitOps controller (Helm: argo/argo-cd)
+│   ├── k8sgpt.tf                     # K8sGPT Operator (AI-powered SRE via AWS Bedrock + IRSA)
+│   ├── karpenter.tf                  # Karpenter: IRSA + Node IAM Role + SQS queue + EventBridge + Helm
+│   ├── keda.tf                       # KEDA Controller + Kubernetes Metrics Server (Helm)
+│   └── outputs.tf                    # Key outputs (endpoints, commands, passwords)
+│
 ├── .github/
 │   └── workflows/
-│       └── terraform.yml             # CI/CD: plan on PR, auto-apply on push to main
+│       ├── terraform.yml             # CI/CD: Terraform plan on PR, auto-apply on push to main, manual destroy
+│       └── deploy.yml                # CI/CD: Build & push ECR images → Deploy Dev → Staging → Prod (sequential)
+│
+└── deploy.sh                         # Manual deployment helper script
 ```
 
 ## Prerequisites
 
 - AWS CLI configured with appropriate credentials (`aws configure`)
-- [Terraform](https://developer.hashicorp.com/terraform/install) >= 1.5
+- [Terraform](https://developer.hashicorp.com/terraform/install) >= **1.6.0**
 - [kubectl](https://kubernetes.io/docs/tasks/tools/)
-- [Helm](https://helm.sh/docs/intro/install/)
+- [Helm](https://helm.sh/docs/intro/install/) >= v3.15
 
 ## Quick Start
 
@@ -497,10 +532,12 @@ terraform apply
 ```
 
 This provisions:
-- EKS cluster (`taskmanager-cluster`) with **On-Demand System Node Group** + **Karpenter Just-in-Time Spot NodePool**
+- EKS cluster (`taskmanager-cluster`) with **On-Demand System Node Group** + **Karpenter Just-in-Time Spot NodePool** (AL2023 AMI)
 - AWS RDS PostgreSQL 15 (`db.t4g.micro`)
 - VPC with public/private subnets across 2 AZs
+- **Route 53 Hosted Zone + ACM SSL certificate + DNS alias** (when `ssl_enabled = true`)
 - CloudWatch Dashboard + Metric Alarms + Container Insights
+- Kubernetes Secret (`app-secret`) with RDS credentials — managed by Terraform (`secret.tf`)
 - **EFK Logging Stack** via Helm (Elasticsearch 8.15, Fluent Bit 3.1, Kibana 8.15)
 - **Prometheus + Grafana + Alertmanager Monitoring Stack** via Helm
 - **Jaeger Distributed Tracing Stack** via Helm (connected to Elasticsearch backend)
@@ -525,16 +562,7 @@ terraform output rds_address
 terraform output rds_k8s_external_service_command | bash
 ```
 
-### 4. Update k8s/secret.yaml with RDS Credentials
-
-Encode your RDS credentials in base64 and update [k8s/secret.yaml](k8s/secret.yaml):
-
-```bash
-# Example
-echo -n "postgres://postgres:<PASSWORD>@<RDS_HOST>:5432/taskdb?sslmode=require" | base64
-```
-
-### 5. Initialize the Database Schema
+### 4. Initialize the Database Schema
 
 Run a one-off pod to create the `tasks` table and `web_anon` role on RDS:
 
@@ -555,7 +583,10 @@ kubectl run rds-init -n taskmanager --image=postgres:15-alpine --rm -i --restart
     GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO web_anon;"
 ```
 
-### 6. ArgoCD (GitOps) & MS Teams Alerts
+> [!NOTE]
+> The Kubernetes Secret (`app-secret`) containing the `PGRST_DB_URI` is automatically created by Terraform (`terraform/secret.tf`) using the RDS endpoint and `db_password` variable. Manual base64 encoding is no longer needed.
+
+### 5. ArgoCD (GitOps) & MS Teams Alerts
 
 ArgoCD is **100% automated via Helm** (`terraform/argocd.tf`). When `terraform apply` completes:
 1. ArgoCD Server & Controllers are running in the `argocd` namespace.
@@ -578,19 +609,32 @@ kubectl port-forward svc/argocd-server 8080:80 -n argocd
 # Open http://localhost:8080 (username: admin)
 ```
 
-### 7. Push Changes to GitHub to Sync
+### 6. Push Changes to GitHub to Sync
 
 Any changes committed and pushed to the `k8s/` directory on the `main` branch will be **automatically synced** by ArgoCD within ~3 minutes and send a notification card directly to Microsoft Teams.
 
 ## Accessing the Application
 
-### Frontend Web UI & API (via Public Ingress NLB)
+### Via HTTPS (Custom Domain — `ssl_enabled = true`)
+
+```bash
+# Output the public URL
+terraform output app_url
+# → https://tasks.yourdomain.com
+```
+
+- **Frontend Web UI**: `https://tasks.yourdomain.com/`
+- **Backend REST API**: `https://tasks.yourdomain.com/api/tasks`
+
+> [!IMPORTANT]
+> You must update your domain registrar to point nameservers to the Route 53 Hosted Zone NS records before the ACM certificate can be validated and the alias record resolves.
+
+### Via Public NLB Hostname (No Custom Domain)
 
 ```bash
 # Get the Public Ingress Controller's external NLB hostname
 kubectl get svc nginx-public-ingress-nginx-controller -n ingress-nginx \
   -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
-# Use the EXTERNAL-IP once AWS provisions the Load Balancer (~2 min)
 ```
 
 - **Frontend Web UI**: `http://<PUBLIC-NLB-HOSTNAME>/`
@@ -617,11 +661,89 @@ kubectl port-forward svc/backend-svc 3000:3000 -n taskmanager
 | **ExternalName Service for RDS** | Backend pods connect via `postgres-svc:5432` — no hardcoded DNS, easy to swap |
 | **Dual Nginx Ingress Controllers** | `nginx-public` (internet-facing NLB) separates public app traffic from `nginx-internal` (VPC-only NLB) which serves admin tools — zero attack surface on Grafana, Kibana, ArgoCD |
 | **Native K8s Ingress (no Istio)** | Eliminates sidecar overhead (~100–150 MB RAM/CPU per pod), removes webhook deadlock risk |
-| **ExternalName proxy pattern** | `ingress-internal.yaml` uses `ExternalName` services in the `ingress-nginx` namespace to reach ClusterIP services across namespaces (`monitoring`, `logging`, `argocd`) without exposing them |
+| **ExternalName proxy pattern** | `ingress-internal.yaml` uses `ExternalName` services in the `ingress-nginx` namespace to reach ClusterIP services across namespaces without exposing them |
+| **ACM + Route 53 for TLS** | Free managed TLS certificate with automated DNS validation. TLS terminated at the NLB layer — zero certificate rotation overhead on pods. Controlled by `ssl_enabled` variable for cost-free dev environments |
+| **Terraform-managed Kubernetes Secret** | DB credentials injected via `terraform/secret.tf` using the `kubernetes_secret` resource — no manual `base64` encoding, no plaintext secrets in git |
 | **ArgoCD via Helm (not raw YAML)** | Zero manual `kubectl apply` steps — MS Teams notifications, app provisioning and namespace creation all automated via `terraform apply` |
 | **`sslmode=require` in DB URI** | AWS RDS enforces TLS by default; this ensures encrypted connections from PostgREST |
-| **Dual Managed Node Groups** | `system_nodes` (`ON_DEMAND` `t3.medium`) for core infra/observability + `app_nodes` (`SPOT` `t3.small`) for stateless app workloads saves ~70% on compute |
+| **Dual Managed Node Groups** | `system_nodes` (`ON_DEMAND` `t3.medium`) for core infra/observability + Karpenter `SPOT` pool for stateless app workloads saves ~70% on compute |
 | **EFK via Helm (not raw YAML)** | Official Helm charts (elastic/elasticsearch, fluent/fluent-bit, elastic/kibana) — production-grade with upgradeable chart versions, parameterized via Terraform variables |
+| **Multi-env Helm chart** | Single `charts/taskmanager` chart parameterized by `values-dev/staging/prod.yaml` — same chart, different resource profiles, image tags, and autoscaling behavior per environment |
+| **Sequential CI/CD pipeline** | `deploy.yml` gates staging on dev smoke tests and gates prod on staging integration tests + manual approval — prevents broken images from reaching production |
+| **AL2023 AMI for Karpenter nodes** | Amazon Linux 2023 is the modern, security-hardened EKS-optimized AMI (replaces AL2). Better boot performance and smaller attack surface |
+
+## SSL / HTTPS Configuration
+
+When `ssl_enabled = true` (default), Terraform (`terraform/ssl.tf`) automates the full HTTPS setup:
+
+1. **Route 53 Hosted Zone** — created for `var.domain_name` (e.g., `yourdomain.com`)
+2. **ACM Certificate** — issued for `var.app_subdomain.var.domain_name` (e.g., `tasks.yourdomain.com`) with DNS validation
+3. **DNS CNAME Validation Records** — automatically inserted into Route 53 so ACM can validate and issue the certificate without manual steps
+4. **Certificate Validation Waiter** — Terraform blocks further resource creation until ACM marks the certificate as `ISSUED`
+5. **Route 53 ALIAS A-Record** — points `tasks.yourdomain.com` → Public NLB hostname (free, auto-updates when NLB DNS changes)
+6. **NLB TLS Termination** — the Public NLB is annotated with the ACM certificate ARN; TLS 1.3 policy (`ELBSecurityPolicy-TLS13-1-2-2021-06`) is enforced
+
+### Required Variables for SSL
+
+```bash
+terraform apply \
+  -var="domain_name=yourdomain.com" \
+  -var="app_subdomain=tasks" \
+  -var="ssl_enabled=true"
+```
+
+### Disable SSL (Dev / Cost Saving)
+
+```bash
+terraform apply -var="ssl_enabled=false"
+```
+
+> [!IMPORTANT]
+> Before running `terraform apply` with `ssl_enabled=true`, point your domain's NS records to the Route 53 Hosted Zone nameservers. ACM DNS validation will fail if Route 53 cannot resolve the CNAME records publicly.
+
+## Multi-Environment Application Deployment
+
+The project uses a Helm chart (`charts/taskmanager`) with environment-specific overrides and a sequential GitHub Actions workflow (`deploy.yml`) for promoting releases.
+
+### Environment Configuration
+
+| Setting | DEV | STAGING | PROD |
+|---|---|---|---|
+| **Frontend replicas** | 1 | 2 | 3 (HPA: 3→10) |
+| **Backend replicas** | 1 | 2 | 3 (KEDA: 3→20) |
+| **Image tag** | `sha-<commit>` (auto-bumped) | `sha-<commit>` (auto-bumped) | `sha-<commit>` (auto-bumped) |
+| **TLS** | Disabled | Optional | ACM + cert-manager |
+| **PodDisruptionBudget** | Disabled | Disabled | `minAvailable: 2` |
+| **Karpenter capacity** | Spot | Spot + On-Demand | On-Demand preferred |
+| **KEDA ScaledObject** | Disabled | Disabled | Enabled (req: 50, max: 20) |
+| **CPU requests (FE/BE)** | 100m / 150m | 150m / 250m | 250m / 300m |
+
+### Deployment Pipeline
+
+The `deploy.yml` workflow triggers on pushes to `main` that change `charts/**`:
+
+```
+Build ECR Images (sha-<commit>)
+    ↓
+Helm Lint (all 3 environments + dry-run)
+    ↓
+🟡 Deploy DEV  → Bump values-dev.yaml → ArgoCD sync → Smoke Test (/api/health)
+    ↓ (only if smoke test passes)
+🟠 Deploy STAGING → Bump values-staging.yaml → ArgoCD sync → Integration Tests
+    ↓ (only if integration tests pass)
+⏸️  Manual approval (GitHub Environment: production)
+    ↓
+🔴 Deploy PRODUCTION → Bump values-prod.yaml → ArgoCD sync → Health Verification → Teams notification
+```
+
+### Required GitHub Secrets for `deploy.yml`
+
+| Secret | Description |
+|---|---|
+| `AWS_ROLE_ARN_BUILD` | IAM Role ARN for OIDC-authenticated ECR pushes (separate from terraform role) |
+| `ECR_REGISTRY` | ECR registry URL (e.g., `123456789.dkr.ecr.us-east-1.amazonaws.com`) |
+| `TEAMS_WEBHOOK_URL` | MS Teams webhook for production deployment notifications |
+| `GITHUB_TOKEN` | Auto-provided — used to commit bumped image tags back to repo |
 
 ## CloudWatch Observability
 
@@ -709,12 +831,10 @@ terraform apply -var="efk_enabled=false"
 
 ### Access Kibana
 
-Kibana is exposed as a **ClusterIP service** and routed via the **Internal Ingress NLB** at `/kibana`:
-
 ```bash
 # Option A: Via Internal Ingress Controller port-forward
 kubectl port-forward svc/nginx-internal-ingress-nginx-controller 8080:80 -n ingress-nginx
-# Open http://localhost:8080/kibana in your browser
+# Open http://localhost:8080/kibana
 
 # Option B: Direct port-forward
 kubectl port-forward svc/kibana-kibana 5601:5601 -n logging
@@ -736,7 +856,7 @@ kubectl port-forward svc/kibana-kibana 5601:5601 -n logging
 
 ### Log Retention
 
-Elasticsearch indices follow the pattern `fluent-bit-YYYY.MM.DD` (daily rotation). To manage storage:
+Elasticsearch indices follow the pattern `fluent-bit-YYYY.MM.DD` (daily rotation):
 
 ```bash
 # List all indices and their sizes
@@ -746,37 +866,12 @@ kubectl exec -n logging elasticsearch-master-0 -- curl -s 'http://localhost:9200
 kubectl exec -n logging elasticsearch-master-0 -- curl -s -X DELETE 'http://localhost:9200/fluent-bit-2024.01.0*'
 ```
 
-### Helm Upgrade
-
-To upgrade chart versions, update the `version` and `imageTag` in [`efk.tf`](terraform/efk.tf) and re-apply:
-```bash
-terraform apply   # Helm handles rolling update automatically
-```
-
 > [!NOTE]
 > For automated index lifecycle management (ILM), configure an ILM policy in Kibana under **Stack Management → Index Lifecycle Policies**.
 
 ## Prometheus & Grafana Monitoring
 
 The cluster includes a production-ready **Prometheus + Grafana + Alertmanager** stack deployed via the official `kube-prometheus-stack` Helm chart ([`terraform/monitoring.tf`](terraform/monitoring.tf)).
-
-### Architecture & Components
-
-```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                        KUBE-PROMETHEUS-STACK (monitoring)                       │
-├───────────────────┬───────────────────┬───────────────────┬─────────────────────┤
-│   Node Exporter   │ kube-state-metrics│  Prometheus TSDB  │       Grafana       │
-│  (Host Hardware)  │ (K8s Deployments) │ (EBS gp3 Storage) │ (ClusterIP :80)     │
-└─────────┬─────────┴─────────┬─────────┴─────────┬─────────┴──────────┬──────────┘
-          │                   │                   │                    │
-          └───────────────────┼───────────────────┘                    │
-                              ▼ scrapes                                ▼ /grafana path
-                  ┌───────────────────────┐                 ┌───────────────────────┐
-                  │      Alertmanager     │                 │   Pre-built EKS &     │
-                  │ (MS Teams Webhook)    │                 │ Workload Dashboards   │
-                  └───────────────────────┘                 └───────────────────────┘
-```
 
 | Component | Role | Chart / Version |
 |---|---|---|
@@ -789,19 +884,11 @@ The cluster includes a production-ready **Prometheus + Grafana + Alertmanager** 
 
 ### Accessing Grafana
 
-#### 1. Retrieve the Auto-Generated Admin Password
-Terraform generates a cryptographically random 16-character password during deployment:
-
 ```bash
-cd terraform
-terraform output -raw grafana_admin_password
-```
+# Retrieve auto-generated admin password
+cd terraform && terraform output -raw grafana_admin_password
 
-#### 2. Access the Grafana Dashboard
-Grafana is exposed as a **ClusterIP service** and routed via the **Internal Ingress NLB** at `/grafana`:
-
-```bash
-# Option A: Via Internal Ingress Controller port-forward
+# Option A: Via Internal Ingress
 kubectl port-forward svc/nginx-internal-ingress-nginx-controller 8080:80 -n ingress-nginx
 # Open http://localhost:8080/grafana (User: admin)
 
@@ -810,17 +897,7 @@ kubectl port-forward svc/kube-prometheus-stack-grafana 3001:80 -n monitoring
 # Open http://localhost:3001 (User: admin)
 ```
 
-### Pre-Built Dashboards Available in Grafana
-
-Once logged in, navigate to **Dashboards** to view pre-loaded boards:
-* **Kubernetes / Compute Resources / Cluster** — Total cluster CPU, memory, and pod capacity
-* **Kubernetes / Compute Resources / Namespace (Workloads)** — CPU & memory per deployment in `taskmanager`
-* **Kubernetes / Compute Resources / Node (Pods)** — Pod density and resource allocation per EKS node
-* **Node Exporter / Use Method / Node** — Hardware-level disk I/O, load average, and network throughput
-
 ### Alertmanager → Microsoft Teams Routing
-
-Alertmanager is configured to automatically route firing alerts to your Microsoft Teams channel when `teams_webhook_url` is provided in Terraform or GitHub Secrets.
 
 Alerts include:
 - `KubePodCrashLooping` — Pod failing and restarting repeatedly
@@ -830,44 +907,14 @@ Alerts include:
 
 ## K8sGPT — AI-Powered SRE with AWS Bedrock
 
-The **K8sGPT Operator** is deployed into the EKS cluster and acts as an automated Site Reliability Engineer (SRE). It continuously scans all Kubernetes objects, sends failure context to **AWS Bedrock (Anthropic Claude 3 Haiku)**, and returns plain-English root-cause diagnoses with exact remediation commands — eliminating the need to manually parse cryptic `kubectl describe` output.
-
-### How It Works
-
-```
-+-----------------------------------------------------------+
-|                     Amazon EKS Cluster                    |
-|                                                           |
-|   Failing Pod (CrashLoopBackOff / OOMKilled)              |
-|        │                                                  |
-|        ▼                                                  |
-|   K8sGPT Operator (k8sgpt namespace)                      |
-|   - Collects pod events + error logs                      |
-|   - Anonymizes sensitive data (IPs, names, env values)    |
-|   - Calls AWS Bedrock via OIDC/IRSA (zero secrets)        |
-+----------------------│------------------------------------+
-                       │  bedrock:InvokeModel
-                       ▼
-             AWS Bedrock (Claude 3 Haiku)
-             - Analyzes Kubernetes error context
-             - Returns root cause + kubectl fix
-                       │
-          ┌────────────┴───────────────┐
-          ▼                            ▼
-   kubectl get results         Microsoft Teams
-   -n k8sgpt -o yaml           (Incident alert card)
-```
+The **K8sGPT Operator** continuously scans all Kubernetes objects, sends failure context to **AWS Bedrock (Anthropic Claude 3 Haiku)**, and returns plain-English root-cause diagnoses with exact remediation commands.
 
 ### Authentication (Zero Secrets via IRSA)
-
-K8sGPT authenticates to AWS Bedrock using **IAM Roles for Service Accounts (IRSA)** — the same mechanism used by the EBS CSI Driver. No API keys are stored anywhere:
 
 - `aws_iam_policy.k8sgpt_bedrock` — Grants `bedrock:InvokeModel` for Claude 3 Haiku/Sonnet only
 - `module.k8sgpt_irsa_role` — Binds the IAM role to the `k8sgpt:k8sgpt-operator` ServiceAccount via OIDC
 
 ### Configuration
-
-Controlled via Terraform variables in `terraform/variables.tf`:
 
 | Variable | Default | Description |
 |---|---|---|
@@ -898,33 +945,6 @@ kubectl get results -n k8sgpt -o yaml
 # Or via Terraform outputs after apply
 terraform output k8sgpt_status_command
 terraform output k8sgpt_results_command
-terraform output k8sgpt_bedrock_model
-```
-
-### Example AI Output
-
-When K8sGPT detects a failing pod, it creates a `Result` Custom Resource like:
-
-```yaml
-apiVersion: core.k8sgpt.ai/v1alpha1
-kind: Result
-metadata:
-  name: taskmanager-backend-crashloop
-  namespace: k8sgpt
-status:
-  details: |
-    Problem: The PostgREST backend pod is crash-looping because it cannot
-    authenticate to RDS PostgreSQL at taskmanager-cluster-postgres...:5432.
-
-    Root Cause: FATAL: password authentication failed for user postgres.
-    The PGRST_DB_URI in Kubernetes Secret 'app-secret' does not match the
-    RDS master password.
-
-    Fix:
-    kubectl create secret generic app-secret \
-      --from-literal=PGRST_DB_URI='postgres://postgres:<CORRECT_PASSWORD>@<RDS_HOST>:5432/taskdb' \
-      -n taskmanager --dry-run=client -o yaml | kubectl apply -f -
-    kubectl rollout restart deployment backend -n taskmanager
 ```
 
 > [!IMPORTANT]
@@ -933,40 +953,7 @@ status:
 
 ## Full-Stack Autoscaling (KEDA + HPA + Karpenter)
 
-The cluster implements a 3-layer, synergistic autoscaling pipeline combining **event-driven pod scaling (KEDA)**, **resource-based pod scaling (HPA)**, and **just-in-time node provisioning (Karpenter)**.
-
-### Autoscaling Lifecycle
-
-```
-                     TRAFFIC SURGE (e.g. 5,000 HTTP req/min)
-                                        │
-                                        ▼
-  ┌───────────────────────────────────────────────────────────────────────────┐
-  │ 1. POD AUTOSCALING TIER (KEDA + HPA)                                      │
-  │ • Prometheus records request rate spike on /metrics                       │
-  │ • KEDA ScaledObject evaluates: rate > 50 req/min/pod                      │
-  │ • HPA scales backend from 2 ➔ 15 replicas                                 │
-  │ • Frontend HPA scales from 3 ➔ 10 replicas on CPU/Memory                  │
-  └─────────────────────────────────────┬─────────────────────────────────────┘
-                                        │
-                                        ▼ 6 Pods in 'Pending' (Node capacity full)
-  ┌───────────────────────────────────────────────────────────────────────────┐
-  │ 2. JUST-IN-TIME NODE PROVISIONING TIER (Karpenter)                        │
-  │ • Karpenter controller analyzes Pending pod resource requests             │
-  │ • Calls AWS EC2 Fleet API directly (< 45s)                                │
-  │ • Provisions optimal Spot instance (t3.medium / c6i.large / m6i.large)   │
-  │ • Binds pending pods immediately with zero scheduling delay               │
-  └─────────────────────────────────────┬─────────────────────────────────────┘
-                                        │
-                                        ▼ Traffic Subsides (Low load / Idle)
-  ┌───────────────────────────────────────────────────────────────────────────┐
-  │ 3. CONSOLIDATION & SCALE-DOWN                                             │
-  │ • KEDA cools down and scales pods back down (15 ➔ 2)                      │
-  │ • PodDisruptionBudgets (frontend:2, backend:1) guarantee zero downtime    │
-  │ • Karpenter consolidates empty/underutilized nodes after 30s idle         │
-  │ • Terminates extra EC2 instances to cut cloud compute costs               │
-  └───────────────────────────────────────────────────────────────────────────┘
-```
+The cluster implements a 3-layer synergistic autoscaling pipeline.
 
 ### Components & Configurations
 
@@ -975,7 +962,7 @@ The cluster implements a 3-layer, synergistic autoscaling pipeline combining **e
 | **KEDA ScaledObject** | `backend` (PostgREST) | `rate(postgrest_requests_total[1m]) > 50 req/min` OR `CPU > 70%` | **2 → 15 pods** | [`k8s/backend-scaledobject.yaml`](k8s/backend-scaledobject.yaml) |
 | **Kubernetes HPA** | `frontend` (Nginx) | `CPU > 75%` OR `Memory > 80%` (via Metrics Server) | **3 → 10 pods** | [`k8s/frontend-hpa.yaml`](k8s/frontend-hpa.yaml) |
 | **PodDisruptionBudget** | `frontend` & `backend` | Guaranteed minimum available pods during drains/consolidation | `minAvailable: 2` (FE) / `minAvailable: 1` (BE) | [`k8s/pdb.yaml`](k8s/pdb.yaml) |
-| **Karpenter NodePool** | `app-nodepool` | Dynamic EC2 provisioning for `Pending` pods (Spot → On-Demand) | Max 100 vCPUs / 200Gi RAM | [`k8s/karpenter-nodepool.yaml`](k8s/karpenter-nodepool.yaml) |
+| **Karpenter NodePool** | `app-nodepool` | Dynamic EC2 provisioning for `Pending` pods (Spot → On-Demand) · AL2023 AMI | Max 100 vCPUs / 200Gi RAM | [`k8s/karpenter-nodepool.yaml`](k8s/karpenter-nodepool.yaml) |
 | **Karpenter Interruption** | Cluster-wide | 2-minute Spot Interruption Warnings & Rebalance Recommendations | SQS + 3× EventBridge Rules | [`terraform/karpenter.tf`](terraform/karpenter.tf) |
 
 ### Operational Commands
@@ -999,29 +986,9 @@ kubectl get pods -n taskmanager -w
 
 ## CI/CD Pipeline
 
-Infrastructure changes are deployed via a **GitHub Actions** workflow ([`.github/workflows/terraform.yml`](.github/workflows/terraform.yml)).
+Two independent GitHub Actions workflows handle infrastructure and application deployments.
 
-### Pipeline Flow
-
-```
-┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
-│  Pull Request     │     │  Push to main     │     │  Manual Trigger  │
-│  (terraform/**)   │     │  (terraform/**)   │     │  (workflow_disp) │
-└────────┬─────────┘     └────────┬─────────┘     └────────┬─────────┘
-         │                      │                      │
-         v                      v                      v
-  ┌─────────────────────────────────────────────────────┐
-  │  Job 1: Format Check (terraform fmt -check)          │
-  │  Job 2: Init → Validate → Plan (+ PR comment)        │
-  └─────────────────────────┬───────────────────────────┘
-                          │
-            ┌─────────────┼─────────────┐
-            v                          v
-    ┌─────────────────┐     ┌─────────────────┐
-    │  Job 3: Apply   │     │  Job 4: Destroy  │
-    │  (push/manual)  │     │  (manual only)   │
-    └─────────────────┘     └─────────────────┘
-```
+### Workflow 1: Terraform Infrastructure (`terraform.yml`)
 
 | Trigger | What Happens |
 |---|---|
@@ -1031,12 +998,42 @@ Infrastructure changes are deployed via a **GitHub Actions** workflow ([`.github
 | **Manual: `apply`** | Format → Plan → Apply (with GitHub Environment approval gate) |
 | **Manual: `destroy`** | Format → Plan → Destroy (cleans up LB ENIs first) |
 
+**Manual workflow inputs also include component toggles:**
+
+| Input | Default | Description |
+|---|---|---|
+| `efk_enabled` | `true` | Toggle EFK logging stack |
+| `monitoring_enabled` | `true` | Toggle Prometheus + Grafana |
+| `argocd_enabled` | `true` | Toggle ArgoCD GitOps controller |
+| `tracing_enabled` | `true` | Toggle Jaeger distributed tracing |
+
+### Workflow 2: Application Deployment (`deploy.yml`)
+
+Builds Docker images, publishes to AWS ECR, and promotes them sequentially through environments via Helm + ArgoCD.
+
+```
+Trigger: push to main (charts/**) or workflow_dispatch
+    ↓
+🐳 Build & Push Frontend + Backend images → AWS ECR (sha-<commit> tag)
+    ↓
+🔍 Helm Lint & Dry-Run all 3 environment value files
+    ↓
+🟡 DEV: Bump values-dev.yaml → commit → ArgoCD auto-sync → Smoke Test
+    ↓ (pipeline stops if smoke test fails)
+🟠 STAGING: Bump values-staging.yaml → commit → ArgoCD sync → Integration Tests
+    ↓ (pipeline stops if integration tests fail)
+⏸️  Manual Approval (GitHub Environment: production)
+    ↓
+🔴 PRODUCTION: Bump values-prod.yaml → commit → ArgoCD sync → Health Verification → Teams Alert
+```
+
 ### Security
 
 - **AWS OIDC** — No static access keys. GitHub Actions authenticates to AWS via OpenID Connect federation
-- **S3 + DynamoDB** — Terraform state is encrypted at rest in S3 with DynamoDB-based locking to prevent concurrent applies
-- **GitHub Environments** — Apply and destroy jobs require environment approval (configurable per environment)
+- **S3 + DynamoDB** — Terraform state is encrypted at rest in S3 with DynamoDB-based locking
+- **GitHub Environments** — Apply and destroy jobs require environment approval
 - **Sensitive masking** — `db_password` injected via `${{ secrets.TF_VAR_db_password }}`, never logged
+- **Least-privilege IAM** — Separate OIDC roles for Terraform (`AWS_ROLE_ARN`) and ECR image builds (`AWS_ROLE_ARN_BUILD`)
 
 ### Setup Prerequisites
 
@@ -1074,18 +1071,22 @@ aws iam create-open-id-connect-provider \
   --client-id-list sts.amazonaws.com
 ```
 
-Create a trust policy (`trust-policy.json`) and IAM role with the necessary permissions for EKS, RDS, VPC, CloudWatch, and Helm.
+Create a trust policy and IAM role with the necessary permissions for EKS, RDS, VPC, CloudWatch, ECR, and Helm.
 
 #### 3. Configure GitHub Repository Settings
 
 **Secrets** (Settings → Secrets → Actions):
+
 | Secret | Value | Description |
 |---|---|---|
-| `AWS_ROLE_ARN` | `arn:aws:iam::123456789012:role/github-actions-terraform` | IAM Role ARN for OIDC federation |
+| `AWS_ROLE_ARN` | `arn:aws:iam::123456789012:role/github-actions-terraform` | IAM Role ARN for Terraform OIDC (infra changes) |
+| `AWS_ROLE_ARN_BUILD` | `arn:aws:iam::123456789012:role/github-actions-ecr-push` | IAM Role ARN for ECR image push OIDC |
+| `ECR_REGISTRY` | `123456789012.dkr.ecr.us-east-1.amazonaws.com` | ECR registry URL for image builds |
 | `TF_VAR_db_password` | Your RDS master password | Injected securely for RDS / PostgREST |
-| `TEAMS_WEBHOOK_URL` | *(Optional)* `https://outlook.office.com/webhook/...` | MS Teams Incoming Webhook for CI/CD alerts |
+| `TEAMS_WEBHOOK_URL` | *(Optional)* `https://outlook.office.com/webhook/...` | MS Teams Incoming Webhook for CI/CD & deployment alerts |
 
 **Variables** (Settings → Variables → Actions):
+
 | Variable | Value |
 |---|---|
 | `AWS_REGION` | `us-east-1` |

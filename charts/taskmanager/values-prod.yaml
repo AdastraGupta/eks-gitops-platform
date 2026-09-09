@@ -1,0 +1,95 @@
+# ─── PRODUCTION Cluster Overrides ─────────────────────────────────────────────
+# Applied on top of values.yaml on the PROD EKS cluster.
+# 3+ replicas (HPA controlled), pinned semantic tags, prod TLS via ACM/cert-manager,
+# PDB minAvailable:2, KEDA ScaledObject, On-Demand + Spot Karpenter mix.
+# ArgoCD on the PROD cluster uses: values.yaml + values-prod.yaml
+# ──────────────────────────────────────────────────────────────────────────────
+
+environment: prod
+
+frontend:
+  replicaCount: 3                           # Base — overridden by HPA when under load
+  image:
+    tag: v1.0.0                             # ALWAYS use pinned semantic versions in prod
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  autoscaling:
+    enabled: true                           # HPA active in prod
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 75
+
+backend:
+  replicaCount: 3
+  image:
+    tag: v1.0.0
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 300m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+  env:
+    logLevel: WARN
+    dbHost: "prod-aurora-cluster.cluster.rds.amazonaws.com"   # Multi-AZ Aurora endpoint
+    dbPort: "5432"
+    dbName: "taskmanager"
+    dbUser: "prod_admin"
+  scaledobject:
+    enabled: true                           # KEDA enabled in prod
+    minReplicaCount: 3
+    maxReplicaCount: 20
+    pollingInterval: 15
+    cooldownPeriod: 60
+    http:
+      targetPendingRequests: 50
+
+secret:
+  name: taskmanager-db-secret               # Created by Terraform on prod cluster
+
+ingress:
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  host: taskmanager.example.com
+  tls:
+    - secretName: taskmanager-prod-tls
+      hosts:
+        - taskmanager.example.com
+
+ingressInternal:
+  host: taskmanager.internal
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2                           # At least 2 pods must stay up during node drains
+
+karpenter:
+  nodepool:
+    instanceCategory:
+      - c
+      - m
+      - r
+    instanceGeneration: 4
+    capacityType:
+      - on-demand                           # Prod uses On-Demand for reliability
+      - spot
+    instanceTypes:
+      - m5.large
+      - m5.xlarge
+      - c5.large
+      - c5.xlarge
+    ttlSecondsAfterEmpty: 60               # Longer grace period in prod
+    ttlSecondsUntilExpired: 2592000        # 30-day node refresh cycle
+
+postgres:
+  host: "prod-aurora-cluster.cluster.rds.amazonaws.com"

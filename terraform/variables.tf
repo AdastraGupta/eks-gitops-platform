@@ -16,6 +16,11 @@ variable "environment" {
   description = "Deployment environment tag (e.g. dev, staging, prod)."
   type        = string
   default     = "dev"
+
+  validation {
+    condition     = contains(["dev", "staging", "prod"], var.environment)
+    error_message = "environment must be one of: dev, staging, prod."
+  }
 }
 
 # ─── VPC ───────────────────────────────────────────────────────────────────────
@@ -237,6 +242,26 @@ variable "karpenter_enabled" {
 
 variable "keda_enabled" {
   description = "Enable KEDA event-driven pod autoscaling. Also installs Kubernetes Metrics Server required for HPA CPU/Memory triggers."
+  type        = bool
+  default     = true
+}
+
+# ─── SSL / DNS (ACM + Route 53) ────────────────────────────────────────────────
+
+variable "domain_name" {
+  description = "Root domain name (e.g. yourdomain.com). Used to create Route 53 Hosted Zone."
+  type        = string
+  default     = "yourdomain.com"
+}
+
+variable "app_subdomain" {
+  description = "Subdomain for the public Task Manager app (e.g. tasks -> tasks.yourdomain.com)."
+  type        = string
+  default     = "tasks"
+}
+
+variable "ssl_enabled" {
+  description = "Enable HTTPS via ACM certificate + Route 53 DNS alias record on the public NLB."
   type        = bool
   default     = true
 }

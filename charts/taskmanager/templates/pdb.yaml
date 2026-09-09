@@ -1,0 +1,33 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+# PDB is only rendered in environments where podDisruptionBudget.enabled = true.
+# Guarantees minimum pods stay alive during voluntary disruptions
+# (EKS node upgrades, node drains, Karpenter deprovisioning).
+# Dev: disabled. Staging: minAvailable=1. Prod: minAvailable=2.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "taskmanager.fullname" . }}-frontend-pdb
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "taskmanager.labels" . | nindent 4 }}
+    tier: frontend
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "taskmanager.frontend.selectorLabels" . | nindent 6 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "taskmanager.fullname" . }}-backend-pdb
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "taskmanager.labels" . | nindent 4 }}
+    tier: backend
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "taskmanager.backend.selectorLabels" . | nindent 6 }}
+{{- end }}

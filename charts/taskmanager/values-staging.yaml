@@ -1,0 +1,77 @@
+# ─── STAGING Cluster Overrides ────────────────────────────────────────────────
+# Applied on top of values.yaml on the STAGING EKS cluster.
+# 2 replicas, release-candidate image tags, TLS via Let's Encrypt staging,
+# PDB enabled, integration-test-grade settings.
+# ArgoCD on the STAGING cluster uses: values.yaml + values-staging.yaml
+# ──────────────────────────────────────────────────────────────────────────────
+
+environment: staging
+
+frontend:
+  replicaCount: 2
+  image:
+    tag: v1.0.0-rc1
+    pullPolicy: Always
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+  autoscaling:
+    enabled: false
+
+backend:
+  replicaCount: 2
+  image:
+    tag: v1.0.0-rc1
+    pullPolicy: Always
+  resources:
+    requests:
+      cpu: 150m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  env:
+    logLevel: INFO
+    dbHost: "staging-rds.cluster.local"     # Staging RDS endpoint
+    dbPort: "5432"
+    dbName: "taskmanager"
+    dbUser: "staging_user"
+  scaledobject:
+    enabled: false
+
+secret:
+  name: taskmanager-db-secret               # Created by Terraform on staging cluster
+
+ingress:
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-staging"
+  host: staging.taskmanager.example.com
+  tls:
+    - secretName: taskmanager-staging-tls
+      hosts:
+        - staging.taskmanager.example.com
+
+ingressInternal:
+  host: staging.taskmanager.internal
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+karpenter:
+  nodepool:
+    capacityType:
+      - spot
+      - on-demand                           # Mix for staging stability
+    instanceTypes:
+      - t3.medium
+      - t3.large
+      - m5.large
+
+postgres:
+  host: "staging-rds.cluster.local"        # Staging RDS endpoint

@@ -7,13 +7,33 @@ metadata:
     app: taskmanager
     tier: public
   annotations:
-    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
     # Rewrite /api → / so PostgREST receives clean requests without the /api prefix
     nginx.ingress.kubernetes.io/use-regex: "true"
     nginx.ingress.kubernetes.io/rewrite-target: /$2
 spec:
   ingressClassName: nginx-public
   rules:
+    # 1. Custom Domain HTTPS Routing
+    - host: tasks.yourdomain.com
+      http:
+        paths:
+          - path: /()(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: frontend-svc
+                port:
+                  number: 80
+          - path: /api(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: backend-svc
+                port:
+                  number: 3000
+    # 2. Fallback routing for direct NLB / IP health check requests
     - http:
         paths:
           - path: /()(.*)

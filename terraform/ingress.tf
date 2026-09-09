@@ -61,15 +61,27 @@ resource "helm_release" "ingress_nginx_public" {
         controllerValue = "k8s.io/nginx-public"
       }
 
-      # Launch an AWS NLB (internet-facing) in public subnets
+      # Launch an AWS NLB (internet-facing) in public subnets with optional SSL termination
       service = {
         type = "LoadBalancer"
-        annotations = {
-          "service.beta.kubernetes.io/aws-load-balancer-type"            = "nlb"
-          "service.beta.kubernetes.io/aws-load-balancer-scheme"          = "internet-facing"
-          "service.beta.kubernetes.io/aws-load-balancer-name"            = "${var.cluster_name}-public-nlb"
-          "service.beta.kubernetes.io/aws-load-balancer-nlb-target-type" = "ip"
+        targetPorts = {
+          http  = "http"
+          https = "http" # NLB terminates SSL on 443, forwards plaintext HTTP to Nginx on 80
         }
+        annotations = merge(
+          {
+            "service.beta.kubernetes.io/aws-load-balancer-type"            = "nlb"
+            "service.beta.kubernetes.io/aws-load-balancer-scheme"          = "internet-facing"
+            "service.beta.kubernetes.io/aws-load-balancer-name"            = "${var.cluster_name}-public-nlb"
+            "service.beta.kubernetes.io/aws-load-balancer-nlb-target-type" = "ip"
+          },
+          var.ssl_enabled ? {
+            "service.beta.kubernetes.io/aws-load-balancer-ssl-cert"               = aws_acm_certificate_validation.app[0].certificate_arn
+            "service.beta.kubernetes.io/aws-load-balancer-ssl-ports"              = "https"
+            "service.beta.kubernetes.io/aws-load-balancer-backend-protocol"       = "tcp"
+            "service.beta.kubernetes.io/aws-load-balancer-ssl-negotiation-policy" = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+          } : {}
+        )
       }
 
       resources = {
@@ -89,7 +101,10 @@ resource "helm_release" "ingress_nginx_public" {
     }
   })]
 
-  depends_on = [kubernetes_namespace.ingress_nginx]
+  depends_on = [
+    kubernetes_namespace.ingress_nginx,
+    aws_acm_certificate_validation.app,
+  ]
 }
 
 # ── 2. Internal Ingress Controller ────────────────────────────────────────────

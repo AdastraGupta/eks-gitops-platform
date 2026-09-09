@@ -225,3 +225,26 @@ output "autoscaling_observe_command" {
   description = "Watch pod scaling events in real time across the taskmanager namespace."
   value       = "kubectl get pods -n taskmanager -w"
 }
+
+# ─── SSL / DNS (ACM + Route 53) ────────────────────────────────────────────────
+
+output "app_https_url" {
+  description = "Public HTTPS URL for the Task Manager application."
+  value       = var.ssl_enabled ? "https://${var.app_subdomain}.${var.domain_name}" : "SSL is disabled (ssl_enabled = false)"
+}
+
+output "acm_certificate_arn" {
+  description = "ARN of the AWS ACM SSL certificate provisioned for the application."
+  value       = var.ssl_enabled ? aws_acm_certificate_validation.app[0].certificate_arn : "SSL is disabled (ssl_enabled = false)"
+}
+
+output "route53_zone_id" {
+  description = "Route 53 Hosted Zone ID for the domain."
+  value       = var.ssl_enabled ? aws_route53_zone.main[0].zone_id : "SSL is disabled (ssl_enabled = false)"
+}
+
+output "route53_nameservers" {
+  description = "Route 53 authoritative nameservers. Delegate these NS records at your domain registrar."
+  value       = var.ssl_enabled ? aws_route53_zone.main[0].name_servers : []
+}
+

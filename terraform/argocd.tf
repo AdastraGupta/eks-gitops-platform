@@ -261,32 +261,52 @@ resource "helm_release" "argocd" {
         namespace  = "argocd"
         project    = "default"
         finalizers = ["resources-finalizer.argocd.argoproj.io"]
+
         labels = {
-          app = "taskmanager"
+          app         = "taskmanager"
+          environment = var.environment
         }
+
         annotations = {
           "notifications.argoproj.io/subscribe.on-sync-succeeded.msteams"  = ""
           "notifications.argoproj.io/subscribe.on-sync-failed.msteams"     = ""
           "notifications.argoproj.io/subscribe.on-health-degraded.msteams" = ""
         }
+
         source = {
           repoURL        = "https://github.com/AdastraGupta/3-tier-k8s-project.git"
           targetRevision = "main"
-          path           = "k8s"
+
+          # Points to Helm chart — NOT the old k8s/ raw manifests folder
+          path = "charts/taskmanager"
+
+          helm = {
+            # Load base defaults first, then overlay environment-specific values.
+            # var.environment resolves to: "dev", "staging", or "prod"
+            valueFiles = [
+              "values.yaml",
+              "values-${var.environment}.yaml"
+            ]
+          }
         }
+
         destination = {
-          server    = "https://kubernetes.default.svc"
-          namespace = "taskmanager"
+          server    = "https://kubernetes.default.svc"  # in-cluster ArgoCD (each cluster manages itself)
+          namespace = "taskmanager"                      # Same namespace name on every cluster
         }
+
         syncPolicy = {
           automated = {
-            prune    = true
+            # Auto-prune is DISABLED in prod to prevent accidental deletion of resources.
+            # In dev/staging, prune is enabled so stale resources are cleaned up automatically.
+            prune    = var.environment != "prod"
             selfHeal = true
           }
           syncOptions = [
             "CreateNamespace=true",
             "PrunePropagationPolicy=foreground",
             "PruneLast=true",
+            "ServerSideApply=true",
           ]
           retry = {
             limit = 5

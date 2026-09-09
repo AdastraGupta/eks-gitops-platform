@@ -1,0 +1,47 @@
+{{- if .Values.karpenter.nodepool.enabled }}
+# Karpenter NodePool — tells Karpenter how to provision EC2 nodes when pods are pending.
+# Instance types, capacity type (Spot vs On-Demand), and TTL values are all
+# parameterized so dev uses cheap Spot t3s and prod uses On-Demand m5/c5s.
+apiVersion: karpenter.sh/v1beta1
+kind: NodePool
+metadata:
+  name: {{ include "taskmanager.fullname" . }}-nodepool
+  labels:
+    {{- include "taskmanager.labels" . | nindent 4 }}
+spec:
+  template:
+    metadata:
+      labels:
+        nodegroup: application
+        environment: {{ .Values.environment }}
+    spec:
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values:
+            {{- toYaml .Values.karpenter.nodepool.capacityType | nindent 12 }}
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values:
+            {{- toYaml .Values.karpenter.nodepool.instanceCategory | nindent 12 }}
+        - key: karpenter.k8s.aws/instance-generation
+          operator: Gt
+          values: ["{{ .Values.karpenter.nodepool.instanceGeneration }}"]
+      nodeClassRef:
+        apiVersion: karpenter.k8s.aws/v1beta1
+        kind: EC2NodeClass
+        name: {{ include "taskmanager.fullname" . }}-nodeclass
+  limits:
+    cpu: 1000
+    memory: 1000Gi
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: {{ .Values.karpenter.nodepool.ttlSecondsAfterEmpty }}s
+    expireAfter: {{ .Values.karpenter.nodepool.ttlSecondsUntilExpired }}s
+{{- end }}

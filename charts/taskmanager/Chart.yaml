@@ -1,0 +1,13 @@
+apiVersion: v2
+name: taskmanager
+description: Helm chart for 3-Tier Task Manager Application (Angular Frontend + Python Backend + PostgreSQL)
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - taskmanager
+  - eks
+  - argocd
+  - kubernetes
+maintainers:
+  - name: AdastraGupta

@@ -1,0 +1,70 @@
+# ─── DEV Cluster Overrides ────────────────────────────────────────────────────
+# Applied on top of values.yaml on the DEV EKS cluster.
+# Low resources, debug logging, no TLS, no HPA/PDB/KEDA.
+# ArgoCD on the DEV cluster uses: values.yaml + values-dev.yaml
+# ──────────────────────────────────────────────────────────────────────────────
+
+environment: dev
+
+frontend:
+  replicaCount: 1
+  image:
+    tag: dev-latest
+    pullPolicy: Always
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 150m
+      memory: 128Mi
+  autoscaling:
+    enabled: false
+
+backend:
+  replicaCount: 1
+  image:
+    tag: dev-latest
+    pullPolicy: Always
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+  env:
+    logLevel: DEBUG
+    dbHost: "dev-rds.cluster.local"         # Dev RDS endpoint (injected by Terraform)
+    dbPort: "5432"
+    dbName: "taskmanager"
+    dbUser: "dev_user"
+  scaledobject:
+    enabled: false
+
+secret:
+  name: taskmanager-db-secret               # Created by Terraform on dev cluster
+
+ingress:
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+  host: dev.taskmanager.example.com
+  tls: []                                   # No TLS in dev
+
+ingressInternal:
+  host: dev.taskmanager.internal
+
+podDisruptionBudget:
+  enabled: false
+
+karpenter:
+  nodepool:
+    capacityType:
+      - spot                                # Dev uses Spot only (cost saving)
+    instanceTypes:
+      - t3.medium
+      - t3.large
+    ttlSecondsAfterEmpty: 30
+
+postgres:
+  host: "dev-rds.cluster.local"            # Dev RDS endpoint

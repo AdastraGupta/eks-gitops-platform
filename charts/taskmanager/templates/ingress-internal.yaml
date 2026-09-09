@@ -1,0 +1,35 @@
+{{- if .Values.ingressInternal.enabled }}
+# Internal Ingress — routes VPC-only traffic via the internal NLB.
+# Used for admin tools, ArgoCD UI (/argocd), and internal service-to-service calls.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "taskmanager.fullname" . }}-ingress-internal
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "taskmanager.labels" . | nindent 4 }}
+  annotations:
+    {{- toYaml .Values.ingressInternal.annotations | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.ingressInternal.className }}
+  rules:
+    - host: {{ .Values.ingressInternal.host | quote }}
+      http:
+        paths:
+          # Internal API access
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "taskmanager.fullname" . }}-backend
+                port:
+                  number: {{ .Values.backend.service.port }}
+          # Internal frontend access
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "taskmanager.fullname" . }}-frontend
+                port:
+                  number: {{ .Values.frontend.service.port }}
+{{- end }}

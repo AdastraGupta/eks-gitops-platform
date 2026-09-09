@@ -1,0 +1,31 @@
+# ─── frontend-configmap.yaml ──────────────────────────────────────────────────
+# NOTE: The original k8s/frontend-configmap.yaml contains ~45KB of Angular
+# build artifacts and Nginx configuration (compiled static assets + nginx.conf).
+#
+# ACTION REQUIRED: Copy the data: block content from
+#   k8s/frontend-configmap.yaml  →  into this template below.
+#
+# The only change from the raw manifest is:
+#   1. metadata.name is replaced with the Helm template name
+#   2. metadata.namespace is replaced with .Values.namespace
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "taskmanager.fullname" . }}-frontend-config
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "taskmanager.labels" . | nindent 4 }}
+    tier: frontend
+data:
+  # ── PASTE CONTENT FROM k8s/frontend-configmap.yaml data: block HERE ─────────
+  # Example structure (replace with actual content):
+  # nginx.conf: |
+  #   server {
+  #     listen 80;
+  #     root /usr/share/nginx/html;
+  #     index index.html;
+  #     ...
+  #   }
+  # index.html: |
+  #   <!DOCTYPE html>...

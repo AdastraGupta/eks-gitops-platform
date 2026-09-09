@@ -1,0 +1,147 @@
+# ─── Base Default Values ──────────────────────────────────────────────────────
+# These are the fallback defaults shared by ALL environments.
+# Environment-specific values files (values-dev.yaml, values-staging.yaml,
+# values-prod.yaml) override only the fields that differ per environment.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Target environment name — injected into pod labels, ConfigMap, and resource names.
+# Overridden per cluster by the environment-specific values file.
+environment: base
+
+# Kubernetes namespace — same name on every cluster (no env suffix).
+namespace: taskmanager
+
+# ── Application Image Registry ────────────────────────────────────────────────
+imageRegistry: ""   # e.g. 123456789.dkr.ecr.us-east-1.amazonaws.com
+
+# ── Frontend Configuration ────────────────────────────────────────────────────
+frontend:
+  replicaCount: 1
+
+  image:
+    repository: taskmanager-frontend
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 80
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+  # Horizontal Pod Autoscaler (enabled only in prod)
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 80
+
+  # Node placement via Karpenter labels
+  nodeSelector:
+    nodegroup: application
+
+# ── Backend Configuration ─────────────────────────────────────────────────────
+backend:
+  replicaCount: 1
+
+  image:
+    repository: taskmanager-backend
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 5000
+    targetPort: 5000
+
+  resources:
+    requests:
+      cpu: 150m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # Application environment variables (non-sensitive)
+  env:
+    logLevel: INFO
+    dbHost: "localhost"
+    dbPort: "5432"
+    dbName: "taskmanager"
+    dbUser: "taskmanager_user"
+    # DB_PASSWORD is injected from Kubernetes Secret (managed by Terraform)
+
+  # KEDA ScaledObject — event-driven autoscaling (enabled only in prod)
+  scaledobject:
+    enabled: false
+    minReplicaCount: 1
+    maxReplicaCount: 10
+    pollingInterval: 30
+    cooldownPeriod: 300
+    # HTTP trigger thresholds
+    http:
+      targetPendingRequests: 100
+
+  # Node placement via Karpenter labels
+  nodeSelector:
+    nodegroup: application
+
+# ── Secret Configuration (Option B: Terraform kubernetes_secret) ──────────────
+# The Kubernetes Secret is created and managed by Terraform (not Helm).
+# This just references the secret name that Terraform creates.
+secret:
+  name: taskmanager-db-secret
+
+# ── Ingress — External (Public ALB) ──────────────────────────────────────────
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+  host: taskmanager.local
+  # TLS — empty by default; populated in staging and prod values files
+  tls: []
+
+# ── Ingress — Internal (VPC-only NLB) ────────────────────────────────────────
+ingressInternal:
+  enabled: true
+  className: nginx-internal
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+  host: taskmanager.internal
+
+# ── Pod Disruption Budget ─────────────────────────────────────────────────────
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+# ── Karpenter Node Pool ───────────────────────────────────────────────────────
+karpenter:
+  nodepool:
+    enabled: true
+    instanceCategory:
+      - c
+      - m
+      - r
+    instanceGeneration: 4
+    capacityType:
+      - spot
+      - on-demand
+    instanceTypes:
+      - t3.medium
+      - t3.large
+    ttlSecondsAfterEmpty: 30
+    ttlSecondsUntilExpired: 2592000   # 30 days
+
+# ── PostgreSQL ExternalName Service ──────────────────────────────────────────
+postgres:
+  # External RDS hostname — overridden per environment
+  host: "localhost"
+  port: 5432

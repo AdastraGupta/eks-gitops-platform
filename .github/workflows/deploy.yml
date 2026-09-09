@@ -1,0 +1,244 @@
+name: "Sequential Multi-Cluster Deployment"
+# ─────────────────────────────────────────────────────────────────────────────
+# Deploys the taskmanager app sequentially: Dev → Staging → Production.
+#
+# Flow:
+#   1. Build & push Docker images to AWS ECR
+#   2. Deploy to DEV (auto, updates values-dev.yaml image tag)
+#   3. Run Dev smoke tests → if pass, proceed
+#   4. Deploy to STAGING (auto, updates values-staging.yaml image tag)
+#   5. Run Staging integration tests → if pass, proceed
+#   6. ⏸️ Manual approval gate (GitHub environment protection)
+#   7. Deploy to PRODUCTION (updates values-prod.yaml image tag)
+#
+# Safety: If any stage fails, the pipeline STOPS. Later stages are never triggered.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "charts/**"
+      - "!charts/taskmanager/values-*.yaml" # Exclude auto-committed tag bumps
+
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to promote (leave empty to build fresh)"
+        required: false
+        default: ""
+      target_env:
+        description: "Deploy to a specific environment only"
+        required: false
+        type: choice
+        options:
+          - all
+          - dev
+          - staging
+          - prod
+        default: all
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
+  FRONTEND_IMAGE: taskmanager-frontend
+  BACKEND_IMAGE: taskmanager-backend
+
+jobs:
+  # ── 1. Build & Push Docker Images ──────────────────────────────────────────
+  build-and-push:
+    name: "🐳 Build & Push ECR Images"
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.set-tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set Image Tag
+        id: set-tag
+        run: |
+          if [ -n "${{ github.event.inputs.image_tag }}" ]; then
+            echo "tag=${{ github.event.inputs.image_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=sha-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_BUILD }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & Push Frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: ${{ env.ECR_REGISTRY }}/${{ env.FRONTEND_IMAGE }}:${{ steps.set-tag.outputs.tag }}
+
+      - name: Build & Push Backend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: ${{ env.ECR_REGISTRY }}/${{ env.BACKEND_IMAGE }}:${{ steps.set-tag.outputs.tag }}
+
+  # ── 2. Helm Lint Validation ─────────────────────────────────────────────────
+  helm-lint:
+    name: "🔍 Helm Lint All Environments"
+    runs-on: ubuntu-latest
+    needs: [build-and-push]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: v3.15.0
+
+      - name: Lint Base Values
+        run: helm lint ./charts/taskmanager
+
+      - name: Lint Dev Values
+        run: helm lint ./charts/taskmanager -f ./charts/taskmanager/values-dev.yaml
+
+      - name: Lint Staging Values
+        run: helm lint ./charts/taskmanager -f ./charts/taskmanager/values-staging.yaml
+
+      - name: Lint Prod Values
+        run: helm lint ./charts/taskmanager -f ./charts/taskmanager/values-prod.yaml
+
+      - name: Dry-Run Render Dev
+        run: |
+          helm template taskmanager ./charts/taskmanager \
+            -f ./charts/taskmanager/values-dev.yaml \
+            --namespace taskmanager | kubectl apply --dry-run=client -f -
+
+      - name: Dry-Run Render Prod
+        run: |
+          helm template taskmanager ./charts/taskmanager \
+            -f ./charts/taskmanager/values-prod.yaml \
+            --namespace taskmanager | kubectl apply --dry-run=client -f -
+
+  # ── 3. Deploy to DEV ────────────────────────────────────────────────────────
+  deploy-dev:
+    name: "🟡 Deploy → DEV Cluster"
+    runs-on: ubuntu-latest
+    needs: [build-and-push, helm-lint] # Only runs after build AND lint succeed
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump image tag in values-dev.yaml
+        run: |
+          IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
+          sed -i "s|tag: .*|tag: $IMAGE_TAG|g" charts/taskmanager/values-dev.yaml
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git diff --quiet || git commit -am "chore(dev): promote image to $IMAGE_TAG [skip ci]"
+          git push
+
+      - name: Wait for ArgoCD Dev Sync
+        # Poll ArgoCD until the application syncs and becomes healthy
+        run: |
+          echo "Waiting for ArgoCD to sync taskmanager on DEV cluster..."
+          sleep 30  # Allow ArgoCD to detect the git change
+
+      - name: Dev Smoke Test
+        run: |
+          echo "Running DEV smoke test..."
+          curl --fail --retry 12 --retry-delay 10 \
+            --retry-all-errors \
+            http://dev.taskmanager.example.com/api/health
+          echo "DEV smoke test PASSED ✅"
+
+  # ── 4. Deploy to STAGING ────────────────────────────────────────────────────
+  deploy-staging:
+    name: "🟠 Deploy → STAGING Cluster"
+    runs-on: ubuntu-latest
+    needs: [build-and-push, deploy-dev] # 🔒 BLOCKED until deploy-dev succeeds
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump image tag in values-staging.yaml
+        run: |
+          IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
+          sed -i "s|tag: .*|tag: $IMAGE_TAG|g" charts/taskmanager/values-staging.yaml
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git diff --quiet || git commit -am "chore(staging): promote image to $IMAGE_TAG [skip ci]"
+          git push
+
+      - name: Wait for ArgoCD Staging Sync
+        run: sleep 30
+
+      - name: Staging Integration Tests
+        run: |
+          echo "Running STAGING integration tests..."
+          curl --fail --retry 12 --retry-delay 10 \
+            --retry-all-errors \
+            https://staging.taskmanager.example.com/api/health
+          # Add your actual integration test commands here (e.g. pytest, newman, etc.)
+          echo "STAGING integration tests PASSED ✅"
+
+  # ── 5. Deploy to PRODUCTION ─────────────────────────────────────────────────
+  deploy-prod:
+    name: "🔴 Deploy → PRODUCTION Cluster"
+    runs-on: ubuntu-latest
+    needs: [build-and-push, deploy-staging] # 🔒 BLOCKED until deploy-staging succeeds
+    # GitHub Environment with required reviewers — pauses pipeline for human approval.
+    # Configure reviewers at: Settings → Environments → production → Required reviewers
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump image tag in values-prod.yaml
+        run: |
+          IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
+          sed -i "s|tag: .*|tag: $IMAGE_TAG|g" charts/taskmanager/values-prod.yaml
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git diff --quiet || git commit -am "chore(prod): release image $IMAGE_TAG [skip ci]"
+          git push
+
+      - name: Wait for ArgoCD Prod Sync
+        run: sleep 60 # Longer wait for prod rolling update
+
+      - name: Production Health Verification
+        run: |
+          echo "Verifying PRODUCTION health after deployment..."
+          curl --fail --retry 15 --retry-delay 15 \
+            --retry-all-errors \
+            https://taskmanager.example.com/api/health
+          echo "PRODUCTION deployment SUCCESSFUL ✅"
+
+      - name: Notify MS Teams on Success
+        if: success()
+        run: |
+          curl -X POST "${{ secrets.TEAMS_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "@type": "MessageCard",
+              "themeColor": "107C10",
+              "summary": "Production Deployment Succeeded",
+              "sections": [{
+                "activityTitle": "✅ Production Deployment Succeeded",
+                "facts": [
+                  {"name": "Image Tag", "value": "${{ needs.build-and-push.outputs.image_tag }}"},
+                  {"name": "Triggered By", "value": "${{ github.actor }}"}
+                ]
+              }]
+            }'

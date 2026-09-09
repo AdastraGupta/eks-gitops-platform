@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "taskmanager.fullname" . }}-backend
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "taskmanager.labels" . | nindent 4 }}
+    tier: backend
+spec:
+  replicas: {{ .Values.backend.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "taskmanager.backend.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0               # Zero downtime rolling updates
+  template:
+    metadata:
+      labels:
+        {{- include "taskmanager.backend.selectorLabels" . | nindent 8 }}
+        environment: {{ .Values.environment }}
+      annotations:
+        # Forces pod restart when ConfigMap changes (e.g. DB_HOST updated)
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      terminationGracePeriodSeconds: 30
+
+      # Spread pods across availability zones for HA
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              {{- include "taskmanager.backend.selectorLabels" . | nindent 14 }}
+
+      # Target Karpenter-provisioned application nodes
+      nodeSelector:
+        {{- toYaml .Values.backend.nodeSelector | nindent 8 }}
+
+      containers:
+        - name: backend
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.backend.service.targetPort }}
+              protocol: TCP
+
+          # ── Non-Sensitive Environment Variables (from ConfigMap) ─────────────
+          envFrom:
+            - configMapRef:
+                name: {{ include "taskmanager.fullname" . }}-config
+
+          # ── Sensitive Variables — DB Password from Terraform-managed Secret ──
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  # This Secret is created by Terraform (kubernetes_secret resource)
+                  # NOT by Helm — Helm only reads it.
+                  name: {{ .Values.secret.name }}
+                  key: password
+
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: {{ .Values.backend.service.targetPort }}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: {{ .Values.backend.service.targetPort }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3

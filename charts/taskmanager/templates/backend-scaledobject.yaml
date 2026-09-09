@@ -1,0 +1,28 @@
+{{- if .Values.backend.scaledobject.enabled }}
+# KEDA ScaledObject — only rendered in environments where scaledobject.enabled = true (production).
+# Provides event-driven, HTTP-request-rate-based pod autoscaling using KEDA's HTTP add-on.
+# In dev and staging this entire file is skipped.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "taskmanager.fullname" . }}-backend-scaledobject
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "taskmanager.labels" . | nindent 4 }}
+    tier: backend
+    scaledobject.keda.sh/name: {{ include "taskmanager.fullname" . }}-backend-scaledobject
+spec:
+  scaleTargetRef:
+    name: {{ include "taskmanager.fullname" . }}-backend
+  pollingInterval: {{ .Values.backend.scaledobject.pollingInterval }}
+  cooldownPeriod: {{ .Values.backend.scaledobject.cooldownPeriod }}
+  minReplicaCount: {{ .Values.backend.scaledobject.minReplicaCount }}
+  maxReplicaCount: {{ .Values.backend.scaledobject.maxReplicaCount }}
+  triggers:
+    - type: http
+      metadata:
+        # Scale based on pending HTTP requests to the backend service
+        targetPendingRequests: "{{ .Values.backend.scaledobject.http.targetPendingRequests }}"
+      authenticationRef:
+        name: {{ include "taskmanager.fullname" . }}-keda-auth
+{{- end }}

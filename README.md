@@ -11,7 +11,7 @@ The system is structured into **4 decoupled, secure tiers**: External Ingress & 
 ```mermaid
 graph TB
     User["🌐 User / Public Browser"]
-    GitHub["📦 GitHub Repository\n(AdastraGupta/eks-gitops-platform · main)"]
+    GitHub["📦 GitHub Repository\n(AdastraGE/eks-gitops-platform · main)"]
     Teams["📣 Microsoft Teams\n(CI/CD · GitOps · Alertmanager)"]
     DevOps["🔐 DevOps / SRE / VPN\n(Internal Tools Access)"]
 
@@ -404,7 +404,7 @@ graph LR
    - **AWS-Managed Add-ons**: `vpc-cni` (direct VPC IP allocation per pod), `coredns` (cluster DNS discovery), `kube-proxy` (node networking), and `aws-ebs-csi-driver` (dynamic storage provisioner).
    - **StorageClass (`gp3`)**: Configured with `volume_binding_mode = "WaitForFirstConsumer"` to ensure EBS volumes are created in the exact Availability Zone of the scheduled pod, with `allow_volume_expansion = true` and `reclaim_policy = "Retain"`. Powers persistent storage for **Elasticsearch (`10Gi`)**, **Prometheus TSDB (`10Gi`)**, and **Alertmanager (`5Gi`)**.
 4. **Automated GitOps Engine (ArgoCD via Helm):**
-   - Fully provisioned by Terraform. Automatically synchronizes `charts/taskmanager` Helm charts from GitHub (`AdastraGupta/eks-gitops-platform`) into the `taskmanager` namespace with self-healing and auto-pruning.
+   - Fully provisioned by Terraform. Automatically synchronizes `charts/taskmanager` Helm charts from GitHub (`AdastraGE/eks-gitops-platform`) into the `taskmanager` namespace with self-healing and auto-pruning.
 5. **Triple-Layer Alerting System (Microsoft Teams Webhook):**
    - **CI/CD Pipeline Alerts**: GitHub Actions emits Rich Adaptive Cards for Terraform Plan, Apply, and Destroy events.
    - **GitOps Alerts**: ArgoCD Notifications publishes real-time sync success, sync failure, and health degradation cards.
@@ -525,7 +525,7 @@ graph LR
 
 ```bash
 # Clone the repository
-git clone https://github.com/AdastraGupta/eks-gitops-platform.git
+git clone https://github.com/AdastraGE/eks-gitops-platform.git
 cd eks-gitops-platform/terraform
 
 # Initialize and apply Terraform
@@ -1073,7 +1073,7 @@ aws iam create-open-id-connect-provider \
   --client-id-list sts.amazonaws.com
 ```
 
-Create a trust policy granting access to `repo:AdastraGupta/eks-gitops-platform:*` and an IAM role with the necessary permissions for EKS, RDS, VPC, CloudWatch, ECR, and Helm:
+Create a trust policy granting access to `repo:AdastraGE/eks-gitops-platform:*` and an IAM role with the necessary permissions for EKS, RDS, VPC, CloudWatch, ECR, and Helm:
 
 ```json
 {
@@ -1090,7 +1090,7 @@ Create a trust policy granting access to `repo:AdastraGupta/eks-gitops-platform:
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
         },
         "StringLike": {
-          "token.actions.githubusercontent.com:sub": "repo:AdastraGupta/eks-gitops-platform:*"
+          "token.actions.githubusercontent.com:sub": "repo:AdastraGE/eks-gitops-platform:*"
         }
       }
     }
@@ -1136,4 +1136,4 @@ terraform destroy
 
 ## Repository
 
-**GitHub**: [https://github.com/AdastraGupta/eks-gitops-platform](https://github.com/AdastraGupta/eks-gitops-platform)
+**GitHub**: [https://github.com/AdastraGE/eks-gitops-platform](https://github.com/AdastraGE/eks-gitops-platform)

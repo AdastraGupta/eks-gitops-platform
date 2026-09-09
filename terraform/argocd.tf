@@ -274,7 +274,7 @@ resource "helm_release" "argocd" {
         }
 
         source = {
-          repoURL        = "https://github.com/AdastraGupta/eks-gitops-platform.git"
+          repoURL        = "https://github.com/AdastraGE/eks-gitops-platform.git"
           targetRevision = "main"
 
           # Points to Helm chart — NOT the old k8s/ raw manifests folder

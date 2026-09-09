@@ -506,12 +506,10 @@ graph LR
 │   ├── keda.tf                       # KEDA Controller + Kubernetes Metrics Server (Helm)
 │   └── outputs.tf                    # Key outputs (endpoints, commands, passwords)
 │
-├── .github/
-│   └── workflows/
-│       ├── terraform.yml             # CI/CD: Terraform plan on PR, auto-apply on push to main, manual destroy
-│       └── deploy.yml                # CI/CD: Build & push ECR images → Deploy Dev → Staging → Prod (sequential)
-│
-└── deploy.sh                         # Manual deployment helper script
+└── .github/
+    └── workflows/
+        ├── terraform.yml             # CI/CD: Terraform plan on PR, auto-apply on push to main, manual destroy
+        └── deploy.yml                # CI/CD: Build & push ECR images → Deploy Dev → Staging → Prod (sequential)
 ```
 
 ## Prerequisites

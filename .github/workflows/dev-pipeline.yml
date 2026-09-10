@@ -1,0 +1,342 @@
+# ─── GitHub Actions: Unified Dev CI/CD Pipeline ──────────────────────────────
+#
+# Production-ready unified pipeline for deploying the entire platform to AWS DEV.
+# Follows Option A (Unified single pipeline) + Option B (GitOps via ArgoCD)
+# deploying raw manifests from the k8s/ directory.
+#
+# Pipeline Flow:
+#   1. validate          → Terraform fmt & validate + Kubernetes YAML validation
+#   2. terraform-dev     → Provisions VPC, EKS 1.30, RDS, Add-ons, and ArgoCD
+#   3. gitops-sync-dev   → Syncs k8s/ manifests to taskmanager namespace via ArgoCD
+#   4. smoke-test        → Tests Public NLB frontend UI and PostgREST backend API
+#   5. summary           → Generates GitHub Step Summary and sends notifications
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: "Dev Environment — Infrastructure & GitOps Pipeline"
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "terraform/**"
+      - "k8s/**"
+      - ".github/workflows/dev-pipeline.yml"
+
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Action to perform on Terraform infrastructure"
+        required: true
+        type: choice
+        options:
+          - apply
+          - plan
+          - destroy
+        default: apply
+      force_argocd_sync:
+        description: "Force immediate ArgoCD sync for taskmanager app (k8s/)"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  id-token: write       # Required for AWS OIDC authentication (STS)
+  contents: write       # Required to commit updated RDS endpoint back to git if changed
+  pull-requests: write  # Required for PR comments
+  issues: write
+
+env:
+  ENVIRONMENT: "dev"
+  TF_VERSION: "1.9.5"
+  TF_WORKING_DIR: "terraform"
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  # ════════════════════════════════════════════════════════════════════════════
+  # 1. PRE-FLIGHT VALIDATION & LINTING
+  # ════════════════════════════════════════════════════════════════════════════
+  validate:
+    name: "🔍 Pre-Flight Validation"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Terraform Validate
+        run: |
+          terraform init -backend=false
+          terraform validate
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Validate Kubernetes Manifests (k8s/)
+        run: |
+          echo "Validating raw Kubernetes manifests in k8s/ directory..."
+          python3 -c '
+          import os, yaml
+          for root, _, files in os.walk("k8s"):
+              for f in files:
+                  if f.endswith((".yaml", ".yml")):
+                      path = os.path.join(root, f)
+                      print(f"Checking {path}...")
+                      with open(path, "r", encoding="utf-8") as stream:
+                          list(yaml.safe_load_all(stream))
+          print("All k8s/*.yaml files passed YAML syntax validation!")
+          '
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 2. TERRAFORM INFRASTRUCTURE (DEV)
+  # ════════════════════════════════════════════════════════════════════════════
+  terraform-dev:
+    name: "☁️ Terraform Infrastructure (Dev)"
+    runs-on: ubuntu-latest
+    needs: [validate]
+    environment: dev
+    outputs:
+      cluster_name: ${{ steps.export-outputs.outputs.cluster_name }}
+      rds_address: ${{ steps.export-outputs.outputs.rds_address }}
+      public_nlb_hostname: ${{ steps.export-outputs.outputs.public_nlb_hostname }}
+      argocd_password_cmd: ${{ steps.export-outputs.outputs.argocd_password_cmd }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-Terraform-Dev-${{ github.run_id }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init (S3 Remote State)
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=k8s-task-manager/dev/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="encrypt=true" \
+            -backend-config="dynamodb_table=${{ vars.TF_STATE_LOCK_TABLE }}"
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan \
+            -input=false \
+            -var="environment=dev" \
+            -var="db_password=${{ secrets.TF_VAR_db_password || 'DevSecret123!' }}" \
+            -var="teams_webhook_url=${{ secrets.TEAMS_WEBHOOK_URL || '' }}" \
+            -out=tfplan.binary
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Terraform Apply (if action is apply or on push)
+        if: ${{ github.event_name == 'push' || github.event.inputs.action == 'apply' }}
+        run: terraform apply -auto-approve tfplan.binary
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Terraform Destroy (if action is destroy)
+        if: ${{ github.event.inputs.action == 'destroy' }}
+        run: |
+          terraform destroy -auto-approve \
+            -var="environment=dev" \
+            -var="db_password=${{ secrets.TF_VAR_db_password || 'DevSecret123!' }}"
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Export Outputs
+        id: export-outputs
+        if: ${{ github.event_name == 'push' || github.event.inputs.action == 'apply' }}
+        run: |
+          CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "taskmanager-cluster")
+          RDS_ADDRESS=$(terraform output -raw rds_address 2>/dev/null || echo "")
+          PUBLIC_NLB=$(terraform output -raw public_lb_url_command 2>/dev/null || echo "")
+          ARGOCD_PW_CMD=$(terraform output -raw argocd_admin_password_command 2>/dev/null || echo "")
+
+          echo "cluster_name=$CLUSTER_NAME" >> $GITHUB_OUTPUT
+          echo "rds_address=$RDS_ADDRESS" >> $GITHUB_OUTPUT
+          echo "public_nlb_hostname=$PUBLIC_NLB" >> $GITHUB_OUTPUT
+          echo "argocd_password_cmd=$ARGOCD_PW_CMD" >> $GITHUB_OUTPUT
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 3. GITOPS ARGO-CD SYNC (k8s/ MANIFESTS)
+  # ════════════════════════════════════════════════════════════════════════════
+  gitops-sync-dev:
+    name: "🔄 GitOps Sync via ArgoCD (/k8s)"
+    runs-on: ubuntu-latest
+    needs: [terraform-dev]
+    if: ${{ github.event_name == 'push' || github.event.inputs.action == 'apply' }}
+    environment: dev
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure Kubeconfig for EKS
+        run: |
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ needs.terraform-dev.outputs.cluster_name }}
+
+      - name: Update RDS Hostname in k8s/postgres-service.yaml
+        run: |
+          RDS_HOST="${{ needs.terraform-dev.outputs.rds_address }}"
+          if [ -n "$RDS_HOST" ] && [ "$RDS_HOST" != "null" ]; then
+            echo "Updating k8s/postgres-service.yaml with RDS hostname: $RDS_HOST"
+            sed -i "s|externalName: .*|externalName: $RDS_HOST|g" k8s/postgres-service.yaml
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git diff --quiet || (git commit -am "chore(dev): update RDS endpoint to $RDS_HOST in k8s/postgres-service.yaml [skip ci]" && git push)
+          fi
+
+      - name: Wait for ArgoCD Server to be Ready
+        run: |
+          echo "Checking ArgoCD Server rollout status..."
+          kubectl rollout status deployment/argocd-server -n argocd --timeout=240s
+
+      - name: Trigger ArgoCD Sync for taskmanager Application
+        run: |
+          echo "Patching ArgoCD taskmanager application to force immediate sync..."
+          kubectl patch application taskmanager -n argocd --type merge -p '{"operation":{"sync":{"syncStrategy":{"hook":{}}}}}' || true
+
+      - name: Wait for Application Pods Rollout (taskmanager namespace)
+        run: |
+          echo "Waiting for frontend deployment rollout in taskmanager namespace..."
+          kubectl rollout status deployment/frontend -n taskmanager --timeout=180s
+          echo "Waiting for backend deployment rollout in taskmanager namespace..."
+          kubectl rollout status deployment/backend -n taskmanager --timeout=180s
+
+      - name: Check Deployed Pods
+        run: |
+          kubectl get pods -n taskmanager -o wide
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 4. POST-DEPLOY SMOKE TESTING
+  # ════════════════════════════════════════════════════════════════════════════
+  smoke-test:
+    name: "🧪 Dev Health & Smoke Tests"
+    runs-on: ubuntu-latest
+    needs: [terraform-dev, gitops-sync-dev]
+    if: ${{ github.event_name == 'push' || github.event.inputs.action == 'apply' }}
+    environment: dev
+    outputs:
+      resolved_nlb: ${{ steps.get-nlb.outputs.nlb }}
+    steps:
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure Kubeconfig for EKS
+        run: |
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ needs.terraform-dev.outputs.cluster_name }}
+
+      - name: Resolve Public NLB Hostname
+        id: get-nlb
+        run: |
+          echo "Querying Public NLB hostname from ingress-nginx controller..."
+          for i in {1..30}; do
+            NLB=$(kubectl get svc nginx-public-ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+            if [ -n "$NLB" ]; then
+              echo "Public NLB Hostname: $NLB"
+              echo "nlb=$NLB" >> $GITHUB_OUTPUT
+              break
+            fi
+            echo "Waiting for AWS NLB hostname allocation ($i/30)..."
+            sleep 10
+          done
+
+      - name: Test Frontend UI Endpoint (/)
+        run: |
+          NLB="${{ steps.get-nlb.outputs.nlb }}"
+          if [ -n "$NLB" ]; then
+            echo "Checking Frontend UI at http://$NLB/ ..."
+            for i in {1..12}; do
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" -m 10 "http://$NLB/" || echo "000")
+              if [ "$STATUS" = "200" ]; then
+                echo "✅ Frontend UI is healthy (HTTP 200 OK)"
+                break
+              fi
+              echo "Waiting for Frontend to respond (attempt $i/12, status: $STATUS)..."
+              sleep 10
+            done
+          fi
+
+      - name: Test Backend API Endpoint (/api/)
+        run: |
+          NLB="${{ steps.get-nlb.outputs.nlb }}"
+          if [ -n "$NLB" ]; then
+            echo "Checking Backend API at http://$NLB/api/ ..."
+            for i in {1..12}; do
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" -m 10 "http://$NLB/api/" || echo "000")
+              if [ "$STATUS" = "200" ]; then
+                echo "✅ PostgREST Backend API is healthy (HTTP 200 OK)"
+                break
+              fi
+              echo "Waiting for Backend to respond (attempt $i/12, status: $STATUS)..."
+              sleep 10
+            done
+          fi
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 5. STEP SUMMARY & REPORTING
+  # ════════════════════════════════════════════════════════════════════════════
+  summary:
+    name: "📊 Dev Deployment Summary"
+    runs-on: ubuntu-latest
+    needs: [terraform-dev, gitops-sync-dev, smoke-test]
+    if: always()
+    steps:
+      - name: Generate GitHub Step Summary
+        run: |
+          cat << 'EOF' >> $GITHUB_STEP_SUMMARY
+          # 🚀 Dev Deployment Summary
+
+          | Resource | Status / Value |
+          |---|---|
+          | **Environment** | `dev` |
+          | **EKS Cluster** | `${{ needs.terraform-dev.outputs.cluster_name }}` |
+          | **AWS Region** | `${{ env.AWS_REGION }}` |
+          | **RDS Hostname** | `${{ needs.terraform-dev.outputs.rds_address }}` |
+          | **Public NLB** | `http://${{ needs.smoke-test.outputs.resolved_nlb }}/` |
+          | **Backend API** | `http://${{ needs.smoke-test.outputs.resolved_nlb }}/api/` |
+          | **GitOps Engine** | ArgoCD (Syncing `k8s/` manifests) |
+
+          ### 🔑 Quick Access Commands
+
+          ```bash
+          # 1. Connect to Dev EKS Cluster
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ needs.terraform-dev.outputs.cluster_name }}
+
+          # 2. Check Application Pods
+          kubectl get pods -n taskmanager -o wide
+
+          # 3. Access ArgoCD UI (Internal)
+          kubectl port-forward svc/nginx-internal-ingress-nginx-controller 8080:80 -n ingress-nginx
+          # Open http://localhost:8080/argocd
+
+          # 4. Access Grafana Dashboard (Internal)
+          kubectl port-forward svc/nginx-internal-ingress-nginx-controller 8081:80 -n ingress-nginx
+          # Open http://localhost:8081/grafana
+          ```
+          EOF

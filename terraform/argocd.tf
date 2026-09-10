@@ -276,18 +276,7 @@ resource "helm_release" "argocd" {
         source = {
           repoURL        = "https://github.com/AdastraGE/eks-gitops-platform.git"
           targetRevision = "main"
-
-          # Points to Helm chart — NOT the old k8s/ raw manifests folder
-          path = "charts/taskmanager"
-
-          helm = {
-            # Load base defaults first, then overlay environment-specific values.
-            # var.environment resolves to: "dev", "staging", or "prod"
-            valueFiles = [
-              "values.yaml",
-              "values-${var.environment}.yaml"
-            ]
-          }
+          path           = "k8s"
         }
 
         destination = {

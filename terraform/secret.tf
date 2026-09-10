@@ -6,11 +6,22 @@
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+resource "kubernetes_namespace" "taskmanager" {
+  metadata {
+    name = "taskmanager"
+    labels = {
+      name                           = "taskmanager"
+      "app.kubernetes.io/managed-by" = "Terraform"
+    }
+  }
+
+  depends_on = [module.eks]
+}
+
 resource "kubernetes_secret" "taskmanager_db" {
   metadata {
-    # Secret name must match .Values.secret.name in values.yaml
     name      = "taskmanager-db-secret"
-    namespace = "taskmanager"
+    namespace = kubernetes_namespace.taskmanager.metadata[0].name
 
     labels = {
       "app.kubernetes.io/managed-by" = "Terraform"
@@ -29,13 +40,10 @@ resource "kubernetes_secret" "taskmanager_db" {
 
   # Recreate the secret if namespace or name changes
   lifecycle {
-    # If someone manually changes the secret in the cluster, Terraform will restore it
     ignore_changes = []
   }
 
   depends_on = [
-    # Ensure the namespace exists before creating the secret
-    # (namespace is created by ArgoCD via Helm chart)
-    module.eks,
+    kubernetes_namespace.taskmanager,
   ]
 }

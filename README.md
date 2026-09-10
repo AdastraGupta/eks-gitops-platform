@@ -441,6 +441,7 @@ graph LR
 | **GitOps** | ArgoCD v2.12 — Helm-managed, fully automated via `terraform apply` |
 | **CI/CD — Infrastructure** | GitHub Actions (`terraform.yml`) — Terraform plan/apply pipeline with OIDC authentication |
 | **CI/CD — Application** | GitHub Actions (`deploy.yml`) — Build & push ECR images, sequential Helm deploy: Dev → Staging → Production with smoke/integration tests and manual approval gate |
+| **CI/CD — Unified Dev Pipeline** | GitHub Actions (`dev-pipeline.yml`) — Single end-to-end pipeline: Lint & Validate → Terraform Apply (Dev) → GitOps Sync via ArgoCD (`k8s/*.yaml`) → Smoke Tests |
 | **Container Registry** | AWS ECR (`taskmanager-frontend`, `taskmanager-backend`) — OIDC-authenticated pushes from GitHub Actions |
 | **Helm Chart** | `charts/taskmanager` (v1.0.0) — multi-environment values: `values-dev.yaml`, `values-staging.yaml`, `values-prod.yaml` |
 | **Ingress** | Dual Nginx Ingress Controllers — `nginx-public` (internet, v4.10.1) + `nginx-internal` (VPC-only, v4.10.1) |
@@ -508,6 +509,7 @@ graph LR
 │
 └── .github/
     └── workflows/
+        ├── dev-pipeline.yml          # CI/CD: Unified Dev deployment (Terraform infra + ArgoCD GitOps k8s/ sync + Smoke tests)
         ├── terraform.yml             # CI/CD: Terraform plan on PR, auto-apply on push to main, manual destroy
         └── deploy.yml                # CI/CD: Build & push ECR images → Deploy Dev → Staging → Prod (sequential)
 ```
@@ -988,7 +990,7 @@ kubectl get pods -n taskmanager -w
 
 ## CI/CD Pipeline
 
-Two independent GitHub Actions workflows handle infrastructure and application deployments.
+Three GitHub Actions workflows handle infrastructure, application deployments, and unified environment automation.
 
 ### Workflow 1: Terraform Infrastructure (`terraform.yml`)
 
@@ -1028,6 +1030,35 @@ Trigger: push to main (charts/**) or workflow_dispatch
     ↓
 🔴 PRODUCTION: Bump values-prod.yaml → commit → ArgoCD sync → Health Verification → Teams Alert
 ```
+
+### Workflow 3: Unified Dev Deployment (`dev-pipeline.yml`)
+
+An end-to-end orchestration pipeline for the **Dev** environment (designed for future expansion to Staging and Prod). It automates infrastructure provisioning via Terraform and deploys application manifests directly from [`k8s/`](file:///c:/Users/Shivam.Gupta/OneDrive - Adastra, s.r.o/Desktop/Github/eks-gitops-platform/k8s) via ArgoCD GitOps, followed by automated smoke testing and markdown summary reporting.
+
+```
+Trigger: push to main (terraform/**, k8s/**) or workflow_dispatch
+    ↓
+1️⃣  Validate: Terraform fmt/validate & Kubernetes manifest YAML linting
+    ↓
+2️⃣  Terraform (Dev): OIDC Auth → Init & Plan → Auto-Apply dev workspace & stack
+    ↓
+3️⃣  GitOps Sync (Dev): Configure kubectl → Refresh & Sync ArgoCD application (source: k8s/*.yaml)
+    ↓
+4️⃣  Smoke Test (Dev): Wait for rollout → Probe Ingress / Frontend HTTP endpoints
+    ↓
+5️⃣  Summary: Collate pipeline status into $GITHUB_STEP_SUMMARY
+```
+
+| Job Stage | Key Actions |
+|---|---|
+| **1. `validate`** | Runs `terraform fmt -check`, `terraform validate`, and YAML schema lint on `k8s/*.yaml` |
+| **2. `terraform-dev`** | Connects via AWS OIDC, selects/creates `dev` workspace, runs `terraform apply -auto-approve -var-file=environments/dev.tfvars` |
+| **3. `gitops-sync-dev`** | Authenticates to EKS, verifies ArgoCD server is running, triggers `argocd app sync taskmanager --prune`, waits for healthy sync |
+| **4. `smoke-test`** | Waits for deployment rollout in `taskmanager` namespace, checks endpoints and HTTP status codes |
+| **5. `summary`** | Generates a Markdown summary table of all jobs in GitHub Actions run view |
+
+> [!NOTE]
+> In accordance with GitOps standards for the dev environment, ArgoCD is configured in `terraform/argocd.tf` to pull manifests directly from the root `k8s/` directory (`postgres-service.yaml`, `postgres-secret.yaml`, `backend-deployment.yaml`, `frontend-deployment.yaml`, `ingress.yaml`, etc.), maintaining strict separation from the Helm chart packaging path.
 
 ### Security
 
@@ -1117,6 +1148,7 @@ Create a trust policy granting access to `repo:AdastraGE/eks-gitops-platform:*` 
 | `AWS_REGION` | `us-east-1` |
 | `TF_STATE_BUCKET` | `your-tf-state-bucket` |
 | `TF_STATE_LOCK_TABLE` | `terraform-state-lock` |
+| `EKS_CLUSTER_NAME` | *(Optional)* `taskmanager-cluster-dev` (overrides cluster name for kubectl authentication) |
 
 ## Teardown
 

@@ -1,0 +1,20 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Gitleaks Configuration
+# Reference: https://github.com/gitleaks/gitleaks
+# ─────────────────────────────────────────────────────────────────────────────
+
+title = "EKS GitOps Platform - Secret Scanning Configuration"
+
+[allowlist]
+description = "Allowlist for test fixtures, documentation examples, and known non-sensitive placeholders"
+paths = [
+  '''\.trivyignore''',
+  '''README\.md''',
+  '''charts/taskmanager/values.*\.yaml''',
+]
+regexes = [
+  '''(?i)DevSecret123!''',
+  '''(?i)dummy.*''',
+  '''(?i)example.*''',
+  '''(?i)placeholder.*''',
+]

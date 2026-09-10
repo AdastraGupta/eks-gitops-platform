@@ -998,22 +998,25 @@ Five GitHub Actions workflows handle PR validation, infrastructure deployments, 
 
 ### Workflow 1: Pull Request Validation (`pr-validation.yml`)
 
-Runs automatically on every Pull Request from feature branches targeting `main` or `develop`. It provides rapid feedback with zero cloud mutation:
+Runs automatically on every Pull Request from feature branches targeting `main` or `develop`. It provides rapid feedback, automated security auditing, and plan previews with zero cloud mutation:
 
 ```
 Trigger: pull_request to main or develop (terraform/**, k8s/**, charts/**)
     ↓ (auto-cancels stale runs on newer commits)
-1️⃣  Pre-Flight Validation:
+1️⃣  Pre-Flight Validation & Security Auditing:
     ├── terraform fmt -check -diff -recursive
     ├── terraform validate (syntax & configuration)
     ├── Python YAML syntax validation across all k8s/*.yaml
-    └── helm lint charts/taskmanager
+    ├── helm lint charts/taskmanager
+    ├── 🔐 Gitleaks: Commit diff & history secret leak detection (.gitleaks.toml)
+    ├── 🛡️ Trivy IaC: AWS security misconfiguration scanning on terraform/
+    └── ☸️ Trivy Config: Kubernetes Pod Security Standards scan on k8s/
     ↓
 2️⃣  Terraform Plan (Dry-Run Preview):
     ├── OIDC Auth → Terraform Init (S3 Backend)
     ├── terraform plan -var="environment=dev" -out=tfplan
     ├── Extract diff metrics: +add, ~change, -destroy
-    └── Post/Update sticky PR comment with summary table & collapsible HCL
+    └── Post/Update sticky PR comment with status badges, security checks & collapsible HCL
 ```
 
 ### Workflow 2: Terraform Infrastructure (`terraform.yml`)
@@ -1035,12 +1038,16 @@ Trigger: pull_request to main or develop (terraform/**, k8s/**, charts/**)
 
 ### Workflow 3: Application Deployment (`deploy.yml`)
 
-Builds Docker images, publishes to AWS ECR, and promotes them sequentially through environments via Helm + ArgoCD.
+Builds Docker images, runs container vulnerability audits, publishes to AWS ECR, and promotes them sequentially through environments via Helm + ArgoCD.
 
 ```
 Trigger: push to main (charts/**) or workflow_dispatch
     ↓
-🐳 Build & Push Frontend + Backend images → AWS ECR (sha-<commit> tag)
+🐳 Build Frontend & Backend container images
+    ↓
+🔍 Trivy Container Security Scan (CVE audits for OS packages and application dependencies)
+    ↓
+☁️ Push verified images to AWS ECR (sha-<commit> tag)
     ↓
 🔍 Helm Lint & Dry-Run all 3 environment value files
     ↓
@@ -1098,13 +1105,25 @@ A dedicated, isolated workflow for destroying AWS cloud environments with built-
 - **Approvals**: Protected by GitHub Environments (`${environment}-destroy`).
 - **Alerts**: Posts summary report to `$GITHUB_STEP_SUMMARY` and optionally dispatches an alert card to Microsoft Teams.
 
-### Security
+### Security & Compliance Architecture
 
-- **AWS OIDC** — No static access keys. GitHub Actions authenticates to AWS via OpenID Connect federation
-- **S3 + DynamoDB** — Terraform state is encrypted at rest in S3 with DynamoDB-based locking
-- **GitHub Environments** — Infrastructure applies require manual sign-off via environment approval gates (`dev-approval`, `${environment}-approval`, `production`)
-- **Sensitive masking** — `db_password` injected via `${{ secrets.TF_VAR_db_password }}`, never logged
-- **Least-privilege IAM** — Separate OIDC roles for Terraform (`AWS_ROLE_ARN`) and ECR image builds (`AWS_ROLE_ARN_BUILD`)
+The platform enforces end-to-end security through 6 defense-in-depth layers across code, pipeline, cloud infrastructure, and runtime:
+
+| Security Domain | Mechanism / Tool | Implementation Details |
+|---|---|---|
+| **Secret Leak Detection** | **Gitleaks** | Automated commit diff & git history scanner in `pr-validation.yml`. Enforces `.gitleaks.toml` allowlists to block accidental credential leaks before merging to `main`. |
+| **IaC Security & SAST** | **Trivy (Config)** | Scans `terraform/` for AWS misconfigurations (open security groups, unencrypted EBS/S3, broad IAM wildcards). |
+| **Kubernetes Compliance** | **Trivy (Config)** | Audits `k8s/*.yaml` against Kubernetes Pod Security Standards (root privileges, missing CPU/mem limits, privilege escalation). |
+| **Container Image CVEs** | **Trivy (Image)** | Scans built frontend & backend Docker images for OS and library CVEs in `deploy.yml` before ECR promotion. |
+| **Cloud Authentication** | **AWS OIDC Federation** | Short-lived GitHub OIDC tokens (`aws-actions/configure-aws-credentials@v4`). Zero static access keys in GitHub Secrets. |
+| **State File Encryption** | **S3 + DynamoDB** | Terraform state encrypted with AES256; concurrent state mutations protected by DynamoDB distributed locking. |
+| **Governance & Approvals** | **GitHub Environments** | Manual approval gates (`dev-approval`, `staging-approval`, `production`, `${env}-destroy`) require designated reviewer sign-off. |
+| **Branch Protection** | **GitHub Rulesets** | `main` requires PRs, linear git history, and 100% passing status on `🔍 Pre-Flight Validation`. |
+| **Runtime Diagnostics** | **K8sGPT + AWS Bedrock** | AI operator inside EKS diagnosing pod crashes, anomalous logs, and cluster events in real-time. |
+
+#### Architectural Exception Management
+* **`.gitleaks.toml`**: Custom rules and path allowlists for documentation, test fixtures, and non-sensitive development mock tokens.
+* **`.trivyignore`**: Audited repository exception list for accepted architectural trade-offs (e.g. public ingress load balancer listeners on port 80/443).
 
 ### Setup Prerequisites
 

@@ -57,9 +57,14 @@ jobs:
       validate_status: ${{ steps.validate.outcome }}
       k8s_status: ${{ steps.k8s_lint.outcome }}
       helm_status: ${{ steps.helm_lint.outcome }}
+      gitleaks_status: ${{ steps.gitleaks.outcome }}
+      trivy_iac_status: ${{ steps.trivy_iac.outcome }}
+      trivy_k8s_status: ${{ steps.trivy_k8s.outcome }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -121,8 +126,53 @@ jobs:
           helm lint charts/taskmanager
         continue-on-error: true
 
+      # ── Secret Leak Detection (Gitleaks) ──────────────────────────────────
+      - name: Install Gitleaks
+        run: |
+          LATEST_TAG=$(curl -s https://api.github.com/repos/gitleaks/gitleaks/releases/latest | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
+          TAG=${LATEST_TAG:-"8.18.4"}
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${TAG}/gitleaks_${TAG}_linux_x64.tar.gz" | tar -xz -C /tmp
+          sudo mv /tmp/gitleaks /usr/local/bin/
+          gitleaks version
+
+      - name: Gitleaks Secret Detection
+        id: gitleaks
+        run: |
+          echo "Scanning commit history and diff for exposed credentials..."
+          if [ -n "${{ github.base_ref }}" ]; then
+            git fetch origin ${{ github.base_ref }} --depth=1 || true
+            gitleaks detect --source=. --config-path=.gitleaks.toml --verbose --redact --log-opts="origin/${{ github.base_ref }}...HEAD"
+          else
+            gitleaks detect --source=. --config-path=.gitleaks.toml --verbose --redact
+          fi
+        continue-on-error: true
+
+      # ── Trivy IaC Security Scan (Terraform) ────────────────────────────────
+      - name: Run Trivy IaC Scanner (Terraform)
+        id: trivy_iac
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: "config"
+          scan-ref: "terraform/"
+          severity: "CRITICAL,HIGH"
+          format: "table"
+          exit-code: "1"
+        continue-on-error: true
+
+      # ── Trivy Manifest Security Scan (Kubernetes & Helm) ───────────────────
+      - name: Run Trivy Manifest Scanner (Kubernetes & Helm)
+        id: trivy_k8s
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: "config"
+          scan-ref: "k8s/"
+          severity: "CRITICAL,HIGH"
+          format: "table"
+          exit-code: "1"
+        continue-on-error: true
+
       # ── Check overall validation outcome ───────────────────────────────────
-      - name: Assert All Validations Passed
+      - name: Assert All Validations & Security Checks Passed
         run: |
           FAILED=0
           if [ "${{ steps.fmt.outcome }}" != "success" ]; then
@@ -141,10 +191,22 @@ jobs:
             echo "::error::Helm chart linting failed."
             FAILED=1
           fi
+          if [ "${{ steps.gitleaks.outcome }}" != "success" ]; then
+            echo "::error::Gitleaks detected hardcoded secrets in the PR commits. Remove or redact exposed secrets."
+            FAILED=1
+          fi
+          if [ "${{ steps.trivy_iac.outcome }}" != "success" ]; then
+            echo "::error::Trivy detected CRITICAL security misconfigurations in terraform/."
+            FAILED=1
+          fi
+          if [ "${{ steps.trivy_k8s.outcome }}" != "success" ]; then
+            echo "::error::Trivy detected CRITICAL security misconfigurations in k8s/ manifests."
+            FAILED=1
+          fi
           if [ "$FAILED" -ne 0 ]; then
             exit 1
           fi
-          echo "✅ All pre-flight validation checks passed!"
+          echo "✅ All pre-flight validations, linting, and security scans passed!"
 
   # ════════════════════════════════════════════════════════════════════════════
   # Job 2: Terraform Plan (Dry-Run Preview)
@@ -246,6 +308,9 @@ jobs:
             | ⚙️ **Terraform Validate** | \`${{ needs.validate.outputs.validate_status == 'success' && '✅ Passed' || '❌ Failed' }}\` | \`terraform validate\` |
             | ☸️ **Kubernetes Manifests** | \`${{ needs.validate.outputs.k8s_status == 'success' && '✅ Passed' || '❌ Failed' }}\` | \`k8s/*.yaml\` syntax check |
             | 📦 **Helm Chart** | \`${{ needs.validate.outputs.helm_status == 'success' && '✅ Passed' || '❌ Failed' }}\` | \`helm lint charts/taskmanager\` |
+            | 🔐 **Secret Leak Detection** | \`${{ needs.validate.outputs.gitleaks_status == 'success' && '✅ Clean' || '❌ Secrets Detected' }}\` | Gitleaks scan on PR commits |
+            | 🛡️ **IaC Security (Terraform)** | \`${{ needs.validate.outputs.trivy_iac_status == 'success' && '✅ Passed' || '❌ Issues Found' }}\` | Trivy AWS misconfiguration scan |
+            | 🛡️ **Manifest Security (K8s)** | \`${{ needs.validate.outputs.trivy_k8s_status == 'success' && '✅ Passed' || '❌ Issues Found' }}\` | Trivy Pod Security Standards scan |
             | 📋 **Terraform Plan (Dev)** | **${planBadge}** | **+${add} to add, ~${change} to change, -${destroy} to destroy** |
 
             <details>

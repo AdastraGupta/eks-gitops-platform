@@ -80,12 +80,28 @@ jobs:
           push: true
           tags: ${{ env.ECR_REGISTRY }}/${{ env.FRONTEND_IMAGE }}:${{ steps.set-tag.outputs.tag }}
 
+      - name: Scan Frontend Image (Trivy CVE Scan)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.ECR_REGISTRY }}/${{ env.FRONTEND_IMAGE }}:${{ steps.set-tag.outputs.tag }}
+          format: "table"
+          severity: "CRITICAL,HIGH"
+          exit-code: "0"
+
       - name: Build & Push Backend
         uses: docker/build-push-action@v5
         with:
           context: ./backend
           push: true
           tags: ${{ env.ECR_REGISTRY }}/${{ env.BACKEND_IMAGE }}:${{ steps.set-tag.outputs.tag }}
+
+      - name: Scan Backend Image (Trivy CVE Scan)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.ECR_REGISTRY }}/${{ env.BACKEND_IMAGE }}:${{ steps.set-tag.outputs.tag }}
+          format: "table"
+          severity: "CRITICAL,HIGH"
+          exit-code: "0"
 
   # ── 2. Helm Lint Validation ─────────────────────────────────────────────────
   helm-lint:

@@ -1,0 +1,13 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Trivy Ignore File (.trivyignore)
+# Reference: https://aquasecurity.github.io/trivy/latest/docs/configuration/filtering/
+# ─────────────────────────────────────────────────────────────────────────────
+# Add Misconfiguration IDs (AVD-AWS-xxxx, KSVxxx) or CVE IDs (CVE-yyyy-xxxx)
+# with an explanation of why the finding is an accepted architectural risk.
+#
+# Examples:
+# # Public ingress load balancer requires internet-facing HTTP listener:
+# AVD-AWS-0053
+#
+# # Development environment test database non-multi-AZ:
+# AVD-AWS-0176

@@ -999,9 +999,9 @@ Four GitHub Actions workflows handle infrastructure, application deployments, un
 | Trigger | What Happens |
 |---|---|
 | **PR to `main`** | Format → Plan → post plan diff as PR comment (no apply) |
-| **Push to `main`** | Format → Plan → **auto-apply** (deploys infrastructure) |
+| **Push to `main`** | Format → Plan → Manual Approval Gate (`dev-approval`) → Apply |
 | **Manual: `plan`** | Format → Plan only (dry-run for any environment) |
-| **Manual: `apply`** | Format → Plan → Apply (with GitHub Environment approval gate) |
+| **Manual: `apply`** | Format → Plan → Manual Approval Gate (`${environment}-approval`) → Apply |
 
 **Manual workflow inputs also include component toggles:**
 
@@ -1041,22 +1041,28 @@ Trigger: push to main (terraform/**, k8s/**) or workflow_dispatch
     ↓
 1️⃣  Validate: Terraform fmt/validate & Kubernetes manifest YAML linting
     ↓
-2️⃣  Terraform (Dev): OIDC Auth → Init & Plan → Auto-Apply dev workspace & stack
+2️⃣  Terraform Plan (Dev): OIDC Auth → Init & Plan → Upload tfplan-dev artifact
     ↓
-3️⃣  GitOps Sync (Dev): Configure kubectl → Refresh & Sync ArgoCD application (source: k8s/*.yaml)
+3️⃣  Manual Approval Gate: Review plan & sign off via GitHub Environment (dev-approval)
     ↓
-4️⃣  Smoke Test (Dev): Wait for rollout → Probe Ingress / Frontend HTTP endpoints
+4️⃣  Terraform Apply (Dev): Download tfplan → Auto-Apply dev workspace & stack
     ↓
-5️⃣  Summary: Collate pipeline status into $GITHUB_STEP_SUMMARY
+5️⃣  GitOps Sync (Dev): Configure kubectl → Refresh & Sync ArgoCD application (source: k8s/*.yaml)
+    ↓
+6️⃣  Smoke Test (Dev): Wait for rollout → Probe Ingress / Frontend HTTP endpoints
+    ↓
+7️⃣  Summary: Collate pipeline status into $GITHUB_STEP_SUMMARY
 ```
 
 | Job Stage | Key Actions |
 |---|---|
 | **1. `validate`** | Runs `terraform fmt -check`, `terraform validate`, and YAML schema lint on `k8s/*.yaml` |
-| **2. `terraform-dev`** | Connects via AWS OIDC, selects/creates `dev` workspace, runs `terraform apply -auto-approve -var-file=environments/dev.tfvars` |
-| **3. `gitops-sync-dev`** | Authenticates to EKS, verifies ArgoCD server is running, triggers `argocd app sync taskmanager --prune`, waits for healthy sync |
-| **4. `smoke-test`** | Waits for deployment rollout in `taskmanager` namespace, checks endpoints and HTTP status codes |
-| **5. `summary`** | Generates a Markdown summary table of all jobs in GitHub Actions run view |
+| **2. `terraform-plan-dev`** | Connects via AWS OIDC, selects `dev` workspace, runs `terraform plan`, and uploads plan artifact |
+| **3. `approval-dev`** | Pauses workflow for human review and sign-off via the `dev-approval` GitHub Environment |
+| **4. `terraform-apply-dev`** | Downloads plan artifact and runs `terraform apply -auto-approve tfplan.binary` |
+| **5. `gitops-sync-dev`** | Authenticates to EKS, verifies ArgoCD server, triggers `argocd app sync taskmanager --prune`, waits for healthy sync |
+| **6. `smoke-test`** | Waits for deployment rollout in `taskmanager` namespace, checks endpoints and HTTP status codes |
+| **7. `summary`** | Generates a Markdown summary table of all jobs in GitHub Actions run view |
 
 > [!NOTE]
 > In accordance with GitOps standards for the dev environment, ArgoCD is configured in `terraform/argocd.tf` to pull manifests directly from the root `k8s/` directory (`postgres-service.yaml`, `postgres-secret.yaml`, `backend-deployment.yaml`, `frontend-deployment.yaml`, `ingress.yaml`, etc.), maintaining strict separation from the Helm chart packaging path.
@@ -1075,7 +1081,7 @@ A dedicated, isolated workflow for destroying AWS cloud environments with built-
 
 - **AWS OIDC** — No static access keys. GitHub Actions authenticates to AWS via OpenID Connect federation
 - **S3 + DynamoDB** — Terraform state is encrypted at rest in S3 with DynamoDB-based locking
-- **GitHub Environments** — Production apply jobs require environment approval
+- **GitHub Environments** — Infrastructure applies require manual sign-off via environment approval gates (`dev-approval`, `${environment}-approval`, `production`)
 - **Sensitive masking** — `db_password` injected via `${{ secrets.TF_VAR_db_password }}`, never logged
 - **Least-privilege IAM** — Separate OIDC roles for Terraform (`AWS_ROLE_ARN`) and ECR image builds (`AWS_ROLE_ARN_BUILD`)
 

@@ -4,8 +4,8 @@
 #
 # Pipeline stages:
 #   PR (plan-only)  → terraform fmt → init → validate → plan → post comment
-#   Push to main    → terraform fmt → init → validate → plan → apply (auto)
-#   Manual trigger  → terraform fmt → init → validate → plan → apply
+#   Push to main    → terraform fmt → init → validate → plan → manual approval → apply
+#   Manual trigger  → terraform fmt → init → validate → plan → manual approval → apply
 #
 # Security:
 #   - AWS credentials via OIDC (no long-lived access keys)
@@ -422,12 +422,34 @@ jobs:
           retention-days: 5
 
   # ════════════════════════════════════════════════════════════════════════════
-  # Job 3: Terraform Apply
+  # Job 3: Manual Approval Gate
+  # ════════════════════════════════════════════════════════════════════════════
+  approval:
+    name: "⏸️ Manual Approval Gate"
+    runs-on: ubuntu-latest
+    needs: plan
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+    environment:
+      name: ${{ github.event.inputs.environment || 'dev' }}-approval
+    steps:
+      - name: Review Plan & Await Approval
+        run: |
+          echo "### ⏸️ Manual Approval Required" >> $GITHUB_STEP_SUMMARY
+          echo "A Terraform Plan has been generated in the **📋 Plan** job." >> $GITHUB_STEP_SUMMARY
+          echo "Please review the proposed infrastructure changes before approving the apply step." >> $GITHUB_STEP_SUMMARY
+          echo "- **Target Environment**: \`${{ github.event.inputs.environment || 'dev' }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Triggered by**: @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Approval granted. Proceeding to Terraform Apply."
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Job 4: Terraform Apply
   # ════════════════════════════════════════════════════════════════════════════
   apply:
     name: "🚀 Apply"
     runs-on: ubuntu-latest
-    needs: plan
+    needs: [plan, approval]
     if: |
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')

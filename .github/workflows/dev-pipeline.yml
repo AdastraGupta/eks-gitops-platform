@@ -5,11 +5,13 @@
 # deploying raw manifests from the k8s/ directory.
 #
 # Pipeline Flow:
-#   1. validate          → Terraform fmt & validate + Kubernetes YAML validation
-#   2. terraform-dev     → Provisions VPC, EKS 1.30, RDS, Add-ons, and ArgoCD
-#   3. gitops-sync-dev   → Syncs k8s/ manifests to taskmanager namespace via ArgoCD
-#   4. smoke-test        → Tests Public NLB frontend UI and PostgREST backend API
-#   5. summary           → Generates GitHub Step Summary and sends notifications
+#   1. validate            → Terraform fmt & validate + Kubernetes YAML validation
+#   2. terraform-plan-dev  → Terraform Init & Plan (outputs tfplan-dev artifact)
+#   3. approval-dev        → ⏸️ Manual Approval Gate (dev-approval environment)
+#   4. terraform-apply-dev → Applies tfplan-dev artifact to AWS Cloud
+#   5. gitops-sync-dev     → Syncs k8s/ manifests to taskmanager namespace via ArgoCD
+#   6. smoke-test          → Tests Public NLB frontend UI and PostgREST backend API
+#   7. summary             → Generates GitHub Step Summary and sends notifications
 # ──────────────────────────────────────────────────────────────────────────────
 
 name: "Dev Environment — Infrastructure & GitOps Pipeline"
@@ -94,18 +96,12 @@ jobs:
           '
 
   # ════════════════════════════════════════════════════════════════════════════
-  # 2. TERRAFORM INFRASTRUCTURE (DEV)
+  # 2. TERRAFORM PLAN (DEV)
   # ════════════════════════════════════════════════════════════════════════════
-  terraform-dev:
-    name: "☁️ Terraform Infrastructure (Dev)"
+  terraform-plan-dev:
+    name: "📋 Terraform Plan (Dev)"
     runs-on: ubuntu-latest
     needs: [validate]
-    environment: dev
-    outputs:
-      cluster_name: ${{ steps.export-outputs.outputs.cluster_name }}
-      rds_address: ${{ steps.export-outputs.outputs.rds_address }}
-      public_nlb_hostname: ${{ steps.export-outputs.outputs.public_nlb_hostname }}
-      argocd_password_cmd: ${{ steps.export-outputs.outputs.argocd_password_cmd }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -115,7 +111,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          role-session-name: GitHubActions-Terraform-Dev-${{ github.run_id }}
+          role-session-name: GitHubActions-Terraform-Plan-Dev-${{ github.run_id }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -143,15 +139,84 @@ jobs:
             -out=tfplan.binary
         working-directory: ${{ env.TF_WORKING_DIR }}
 
-      - name: Terraform Apply (if action is apply or on push)
-        if: ${{ github.event_name == 'push' || github.event.inputs.action == 'apply' }}
+      - name: Upload Plan Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-dev-${{ github.run_id }}
+          path: ${{ env.TF_WORKING_DIR }}/tfplan.binary
+          retention-days: 1
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 3. MANUAL APPROVAL GATE (DEV)
+  # ════════════════════════════════════════════════════════════════════════════
+  approval-dev:
+    name: "⏸️ Manual Approval Gate (Dev)"
+    runs-on: ubuntu-latest
+    needs: [terraform-plan-dev]
+    if: ${{ github.event_name == 'push' || github.event.inputs.action == 'apply' }}
+    environment: dev-approval
+    steps:
+      - name: Review Dev Plan & Await Approval
+        run: |
+          echo "### ⏸️ Manual Approval Required (Dev)" >> $GITHUB_STEP_SUMMARY
+          echo "A Terraform Plan has been generated for the **dev** environment." >> $GITHUB_STEP_SUMMARY
+          echo "Please inspect the plan in the **📋 Terraform Plan (Dev)** job before approving." >> $GITHUB_STEP_SUMMARY
+          echo "- **Target Environment**: \`dev\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Triggered by**: @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Approval granted. Proceeding to Terraform Apply (Dev)."
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 4. TERRAFORM APPLY (DEV)
+  # ════════════════════════════════════════════════════════════════════════════
+  terraform-apply-dev:
+    name: "☁️ Terraform Apply (Dev)"
+    runs-on: ubuntu-latest
+    needs: [terraform-plan-dev, approval-dev]
+    if: ${{ github.event_name == 'push' || github.event.inputs.action == 'apply' }}
+    environment: dev
+    outputs:
+      cluster_name: ${{ steps.export-outputs.outputs.cluster_name }}
+      rds_address: ${{ steps.export-outputs.outputs.rds_address }}
+      public_nlb_hostname: ${{ steps.export-outputs.outputs.public_nlb_hostname }}
+      argocd_password_cmd: ${{ steps.export-outputs.outputs.argocd_password_cmd }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-Terraform-Apply-Dev-${{ github.run_id }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init (S3 Remote State)
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=k8s-task-manager/dev/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="encrypt=true" \
+            -backend-config="dynamodb_table=${{ vars.TF_STATE_LOCK_TABLE }}"
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Download Plan Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-dev-${{ github.run_id }}
+          path: ${{ env.TF_WORKING_DIR }}
+
+      - name: Terraform Apply
         run: terraform apply -auto-approve tfplan.binary
         working-directory: ${{ env.TF_WORKING_DIR }}
 
-
       - name: Export Outputs
         id: export-outputs
-        if: ${{ github.event_name == 'push' || github.event.inputs.action == 'apply' }}
         run: |
           CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "taskmanager-cluster")
           RDS_ADDRESS=$(terraform output -raw rds_address 2>/dev/null || echo "")
@@ -165,12 +230,12 @@ jobs:
         working-directory: ${{ env.TF_WORKING_DIR }}
 
   # ════════════════════════════════════════════════════════════════════════════
-  # 3. GITOPS ARGO-CD SYNC (k8s/ MANIFESTS)
+  # 5. GITOPS ARGO-CD SYNC (k8s/ MANIFESTS)
   # ════════════════════════════════════════════════════════════════════════════
   gitops-sync-dev:
     name: "🔄 GitOps Sync via ArgoCD (/k8s)"
     runs-on: ubuntu-latest
-    needs: [terraform-dev]
+    needs: [terraform-apply-dev]
     if: ${{ github.event_name == 'push' || github.event.inputs.action == 'apply' }}
     environment: dev
     steps:
@@ -187,11 +252,11 @@ jobs:
 
       - name: Configure Kubeconfig for EKS
         run: |
-          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ needs.terraform-dev.outputs.cluster_name }}
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ needs.terraform-apply-dev.outputs.cluster_name }}
 
       - name: Update RDS Hostname in k8s/postgres-service.yaml
         run: |
-          RDS_HOST="${{ needs.terraform-dev.outputs.rds_address }}"
+          RDS_HOST="${{ needs.terraform-apply-dev.outputs.rds_address }}"
           if [ -n "$RDS_HOST" ] && [ "$RDS_HOST" != "null" ]; then
             echo "Updating k8s/postgres-service.yaml with RDS hostname: $RDS_HOST"
             sed -i "s|externalName: .*|externalName: $RDS_HOST|g" k8s/postgres-service.yaml
@@ -222,12 +287,12 @@ jobs:
           kubectl get pods -n taskmanager -o wide
 
   # ════════════════════════════════════════════════════════════════════════════
-  # 4. POST-DEPLOY SMOKE TESTING
+  # 6. POST-DEPLOY SMOKE TESTING
   # ════════════════════════════════════════════════════════════════════════════
   smoke-test:
     name: "🧪 Dev Health & Smoke Tests"
     runs-on: ubuntu-latest
-    needs: [terraform-dev, gitops-sync-dev]
+    needs: [terraform-apply-dev, gitops-sync-dev]
     if: ${{ github.event_name == 'push' || github.event.inputs.action == 'apply' }}
     environment: dev
     outputs:
@@ -241,7 +306,7 @@ jobs:
 
       - name: Configure Kubeconfig for EKS
         run: |
-          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ needs.terraform-dev.outputs.cluster_name }}
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ needs.terraform-apply-dev.outputs.cluster_name }}
 
       - name: Resolve Public NLB Hostname
         id: get-nlb
@@ -291,12 +356,12 @@ jobs:
           fi
 
   # ════════════════════════════════════════════════════════════════════════════
-  # 5. STEP SUMMARY & REPORTING
+  # 7. STEP SUMMARY & REPORTING
   # ════════════════════════════════════════════════════════════════════════════
   summary:
     name: "📊 Dev Deployment Summary"
     runs-on: ubuntu-latest
-    needs: [terraform-dev, gitops-sync-dev, smoke-test]
+    needs: [validate, terraform-plan-dev, approval-dev, terraform-apply-dev, gitops-sync-dev, smoke-test]
     if: always()
     steps:
       - name: Generate GitHub Step Summary
@@ -307,9 +372,9 @@ jobs:
           | Resource | Status / Value |
           |---|---|
           | **Environment** | `dev` |
-          | **EKS Cluster** | `${{ needs.terraform-dev.outputs.cluster_name }}` |
+          | **EKS Cluster** | `${{ needs.terraform-apply-dev.outputs.cluster_name }}` |
           | **AWS Region** | `${{ env.AWS_REGION }}` |
-          | **RDS Hostname** | `${{ needs.terraform-dev.outputs.rds_address }}` |
+          | **RDS Hostname** | `${{ needs.terraform-apply-dev.outputs.rds_address }}` |
           | **Public NLB** | `http://${{ needs.smoke-test.outputs.resolved_nlb }}/` |
           | **Backend API** | `http://${{ needs.smoke-test.outputs.resolved_nlb }}/api/` |
           | **GitOps Engine** | ArgoCD (Syncing `k8s/` manifests) |
@@ -318,7 +383,7 @@ jobs:
 
           ```bash
           # 1. Connect to Dev EKS Cluster
-          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ needs.terraform-dev.outputs.cluster_name }}
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ needs.terraform-apply-dev.outputs.cluster_name }}
 
           # 2. Check Application Pods
           kubectl get pods -n taskmanager -o wide

@@ -3,7 +3,6 @@
 # Production-grade workflow for provisioning AWS infrastructure via Terraform.
 #
 # Pipeline stages:
-#   PR (plan-only)  → terraform fmt → init → validate → plan → post comment
 #   Push to main    → terraform fmt → init → validate → plan → manual approval → apply
 #   Manual trigger  → terraform fmt → init → validate → plan → manual approval → apply
 #
@@ -27,12 +26,7 @@
 name: "Terraform — Infrastructure CI/CD"
 
 on:
-  # ── Pull Request: plan only (no changes applied) ─────────────────────────
-  pull_request:
-    branches: [main]
-    paths:
-      - "terraform/**"
-      - ".github/workflows/terraform.yml"
+
 
   # ── Push to main: auto-apply after successful plan ───────────────────────
   push:
@@ -258,75 +252,7 @@ jobs:
           fi
         working-directory: ${{ env.TF_WORKING_DIR }}
 
-      # ── Post plan as PR comment ────────────────────────────────────────────
-      - name: Post plan on PR
-        if: github.event_name == 'pull_request' && always()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const planPath = '${{ env.TF_WORKING_DIR }}/plan_output.txt';
-            let planOutput = 'No plan output available.';
-            if (fs.existsSync(planPath)) {
-              planOutput = fs.readFileSync(planPath, 'utf8');
-              // Truncate to fit GitHub comment limit (65536 chars)
-              if (planOutput.length > 60000) {
-                planOutput = planOutput.substring(0, 60000) + '\n\n... (truncated, see workflow logs for full output)';
-              }
-            }
 
-            const exitCode = '${{ steps.plan.outcome }}';
-            const emoji = exitCode === 'success' ? '✅' : '❌';
-            const add = '${{ steps.plan_summary.outputs.add }}' || '0';
-            const change = '${{ steps.plan_summary.outputs.change }}' || '0';
-            const destroy = '${{ steps.plan_summary.outputs.destroy }}' || '0';
-
-            const output = `### ${emoji} Terraform Plan Results
-
-            | Step | Status |
-            |------|--------|
-            | 🔍 Format | \`${{ steps.fmt.outcome || 'passed' }}\` |
-            | ⚙️ Init   | \`${{ steps.init.outcome }}\` |
-            | ✅ Validate | \`${{ steps.validate.outcome }}\` |
-            | 📋 Plan   | \`${exitCode}\` |
-
-            **Summary:** \`${add}\` to add, \`${change}\` to change, \`${destroy}\` to destroy.
-
-            <details><summary>📄 Show Plan Output</summary>
-
-            \`\`\`hcl
-            ${planOutput}
-            \`\`\`
-
-            </details>
-
-            *Environment: \`${{ github.event.inputs.environment || 'dev' }}\` | Workflow: \`${{ github.workflow }}\` | Triggered by: @${{ github.actor }}*`;
-
-            // Find and update existing comment or create new one
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-            const botComment = comments.find(c =>
-              c.user.type === 'Bot' && c.body.includes('Terraform Plan Results')
-            );
-
-            if (botComment) {
-              github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: botComment.id,
-                body: output
-              });
-            } else {
-              github.rest.issues.createComment({
-                issue_number: context.issue.number,
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                body: output
-              });
-            }
 
       # ── Send MS Teams Notification (Plan) ──────────────────────────────────
       - name: Send MS Teams Notification (Plan)

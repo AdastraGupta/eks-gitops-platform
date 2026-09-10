@@ -439,7 +439,8 @@ graph LR
 | **Backend API** | [PostgREST](https://postgrest.org/) v12.2.3 — auto-generates REST API from PostgreSQL schema (ECR image: `taskmanager-backend`) |
 | **Database** | AWS RDS PostgreSQL 15 (`db.t4g.micro`, Single-AZ) |
 | **GitOps** | ArgoCD v2.12 — Helm-managed, fully automated via `terraform apply` |
-| **CI/CD — Infrastructure** | GitHub Actions (`terraform.yml`) — Terraform plan/apply pipeline with OIDC authentication |
+| **CI/CD — PR Validation** | GitHub Actions (`pr-validation.yml`) — Automated PR validation for all feature branches: Terraform fmt/validate, K8s YAML & Helm linting, Dev Terraform Plan, sticky PR diff comments |
+| **CI/CD — Infrastructure** | GitHub Actions (`terraform.yml`) — Terraform plan/apply pipeline with OIDC authentication and manual approval gate |
 | **CI/CD — Application** | GitHub Actions (`deploy.yml`) — Build & push ECR images, sequential Helm deploy: Dev → Staging → Production with smoke/integration tests and manual approval gate |
 | **CI/CD — Unified Dev Pipeline** | GitHub Actions (`dev-pipeline.yml`) — Single end-to-end pipeline: Lint & Validate → Terraform Apply (Dev) → GitOps Sync via ArgoCD (`k8s/*.yaml`) → Smoke Tests |
 | **CI/CD — Infrastructure Teardown** | GitHub Actions (`destroy.yml`) — Dedicated manual-only teardown pipeline with confirmation guardrails and NLB pre-cleanup |
@@ -510,8 +511,9 @@ graph LR
 │
 └── .github/
     └── workflows/
+        ├── pr-validation.yml         # CI/CD: Automated PR validation (linting, schema checks, dry-run plan & sticky PR comment)
         ├── dev-pipeline.yml          # CI/CD: Unified Dev deployment (Terraform infra + ArgoCD GitOps k8s/ sync + Smoke tests)
-        ├── terraform.yml             # CI/CD: Terraform plan on PR, auto-apply on push to main, manual plan/apply
+        ├── terraform.yml             # CI/CD: Terraform deployment on push to main with manual approval gate
         ├── deploy.yml                # CI/CD: Build & push ECR images → Deploy Dev → Staging → Prod (sequential)
         └── destroy.yml               # CI/CD: Dedicated manual teardown workflow with confirmation guardrails
 ```
@@ -992,13 +994,32 @@ kubectl get pods -n taskmanager -w
 
 ## CI/CD Pipeline
 
-Four GitHub Actions workflows handle infrastructure, application deployments, unified environment automation, and isolated teardown.
+Five GitHub Actions workflows handle PR validation, infrastructure deployments, application delivery, unified environment automation, and isolated teardown.
 
-### Workflow 1: Terraform Infrastructure (`terraform.yml`)
+### Workflow 1: Pull Request Validation (`pr-validation.yml`)
+
+Runs automatically on every Pull Request from feature branches targeting `main` or `develop`. It provides rapid feedback with zero cloud mutation:
+
+```
+Trigger: pull_request to main or develop (terraform/**, k8s/**, charts/**)
+    ↓ (auto-cancels stale runs on newer commits)
+1️⃣  Pre-Flight Validation:
+    ├── terraform fmt -check -diff -recursive
+    ├── terraform validate (syntax & configuration)
+    ├── Python YAML syntax validation across all k8s/*.yaml
+    └── helm lint charts/taskmanager
+    ↓
+2️⃣  Terraform Plan (Dry-Run Preview):
+    ├── OIDC Auth → Terraform Init (S3 Backend)
+    ├── terraform plan -var="environment=dev" -out=tfplan
+    ├── Extract diff metrics: +add, ~change, -destroy
+    └── Post/Update sticky PR comment with summary table & collapsible HCL
+```
+
+### Workflow 2: Terraform Infrastructure (`terraform.yml`)
 
 | Trigger | What Happens |
 |---|---|
-| **PR to `main`** | Format → Plan → post plan diff as PR comment (no apply) |
 | **Push to `main`** | Format → Plan → Manual Approval Gate (`dev-approval`) → Apply |
 | **Manual: `plan`** | Format → Plan only (dry-run for any environment) |
 | **Manual: `apply`** | Format → Plan → Manual Approval Gate (`${environment}-approval`) → Apply |

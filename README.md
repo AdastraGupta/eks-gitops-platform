@@ -1011,7 +1011,7 @@ Trigger: pull_request to main or develop (terraform/**, k8s/**, charts/**)
     ├── 🔐 Gitleaks: Commit diff & history secret leak detection (.gitleaks.toml)
     ├── 🛡️ Trivy IaC: AWS security misconfiguration scanning on terraform/
     ├── ☸️ Trivy Config: Kubernetes Pod Security Standards scan on k8s/
-    └── 📋 Checkov: CIS AWS & Kubernetes benchmark compliance auditing (.checkov.yaml)
+    └── 📋 Checkov: CIS AWS & Kubernetes benchmark compliance auditing
     ↓
 2️⃣  Terraform Plan (Dry-Run Preview):
     ├── OIDC Auth → Terraform Init (S3 Backend)
@@ -1126,7 +1126,6 @@ The platform enforces end-to-end security through 6 defense-in-depth layers acro
 #### Architectural Exception Management
 * **`.gitleaks.toml`**: Custom rules and path allowlists for documentation, test fixtures, and non-sensitive development mock tokens.
 * **`.trivyignore`**: Audited repository exception list for accepted architectural trade-offs (e.g. public ingress load balancer listeners on port 80/443).
-* **`.checkov.yaml`**: Static code analysis configuration and policy suppression for Checkov.
 
 ### Setup Prerequisites
 

@@ -442,6 +442,7 @@ graph LR
 | **CI/CD — Infrastructure** | GitHub Actions (`terraform.yml`) — Terraform plan/apply pipeline with OIDC authentication |
 | **CI/CD — Application** | GitHub Actions (`deploy.yml`) — Build & push ECR images, sequential Helm deploy: Dev → Staging → Production with smoke/integration tests and manual approval gate |
 | **CI/CD — Unified Dev Pipeline** | GitHub Actions (`dev-pipeline.yml`) — Single end-to-end pipeline: Lint & Validate → Terraform Apply (Dev) → GitOps Sync via ArgoCD (`k8s/*.yaml`) → Smoke Tests |
+| **CI/CD — Infrastructure Teardown** | GitHub Actions (`destroy.yml`) — Dedicated manual-only teardown pipeline with confirmation guardrails and NLB pre-cleanup |
 | **Container Registry** | AWS ECR (`taskmanager-frontend`, `taskmanager-backend`) — OIDC-authenticated pushes from GitHub Actions |
 | **Helm Chart** | `charts/taskmanager` (v1.0.0) — multi-environment values: `values-dev.yaml`, `values-staging.yaml`, `values-prod.yaml` |
 | **Ingress** | Dual Nginx Ingress Controllers — `nginx-public` (internet, v4.10.1) + `nginx-internal` (VPC-only, v4.10.1) |
@@ -511,7 +512,8 @@ graph LR
     └── workflows/
         ├── dev-pipeline.yml          # CI/CD: Unified Dev deployment (Terraform infra + ArgoCD GitOps k8s/ sync + Smoke tests)
         ├── terraform.yml             # CI/CD: Terraform plan on PR, auto-apply on push to main, manual plan/apply
-        └── deploy.yml                # CI/CD: Build & push ECR images → Deploy Dev → Staging → Prod (sequential)
+        ├── deploy.yml                # CI/CD: Build & push ECR images → Deploy Dev → Staging → Prod (sequential)
+        └── destroy.yml               # CI/CD: Dedicated manual teardown workflow with confirmation guardrails
 ```
 
 ## Prerequisites
@@ -990,7 +992,7 @@ kubectl get pods -n taskmanager -w
 
 ## CI/CD Pipeline
 
-Three GitHub Actions workflows handle infrastructure, application deployments, and unified environment automation.
+Four GitHub Actions workflows handle infrastructure, application deployments, unified environment automation, and isolated teardown.
 
 ### Workflow 1: Terraform Infrastructure (`terraform.yml`)
 
@@ -1058,6 +1060,16 @@ Trigger: push to main (terraform/**, k8s/**) or workflow_dispatch
 
 > [!NOTE]
 > In accordance with GitOps standards for the dev environment, ArgoCD is configured in `terraform/argocd.tf` to pull manifests directly from the root `k8s/` directory (`postgres-service.yaml`, `postgres-secret.yaml`, `backend-deployment.yaml`, `frontend-deployment.yaml`, `ingress.yaml`, etc.), maintaining strict separation from the Helm chart packaging path.
+
+### Workflow 4: Infrastructure Teardown (`destroy.yml`)
+
+A dedicated, isolated workflow for destroying AWS cloud environments with built-in safety controls.
+
+- **Trigger**: Manual only (`workflow_dispatch`)
+- **Safety Gate**: Requires explicitly typing the target environment name (e.g. `dev`, `staging`, `prod`) to prevent accidental destruction.
+- **Pre-Clean Hook**: Automatically deletes Public & Internal Ingress NLBs to release ENIs before tearing down VPC subnets.
+- **Approvals**: Protected by GitHub Environments (`${environment}-destroy`).
+- **Alerts**: Posts summary report to `$GITHUB_STEP_SUMMARY` and optionally dispatches an alert card to Microsoft Teams.
 
 ### Security
 
@@ -1151,8 +1163,14 @@ Create a trust policy granting access to `repo:AdastraGE/eks-gitops-platform:*` 
 
 ## Teardown
 
-To protect cloud infrastructure against accidental deletion, teardown is intentionally excluded from automated CI/CD pipelines and must be executed manually via the Terraform CLI:
+### Option A: Via GitHub Actions (`destroy.yml`) — Recommended
+1. In GitHub, navigate to **Actions** → **Terraform — Teardown (Manual Destroy)**.
+2. Click **Run workflow**.
+3. Select the target **environment** (`dev`, `staging`, or `prod`).
+4. Type the environment name (e.g. `dev`) in the `confirm_destroy` box to confirm.
+5. Click **Run workflow**.
 
+### Option B: Local CLI
 ```bash
 cd terraform
 

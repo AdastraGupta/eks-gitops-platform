@@ -151,7 +151,7 @@ jobs:
       # ── Trivy IaC Security Scan (Terraform) ────────────────────────────────
       - name: Run Trivy IaC Scanner (Terraform)
         id: trivy_iac
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           scan-type: "config"
           scan-ref: "terraform/"
@@ -163,7 +163,7 @@ jobs:
       # ── Trivy Manifest Security Scan (Kubernetes & Helm) ───────────────────
       - name: Run Trivy Manifest Scanner (Kubernetes & Helm)
         id: trivy_k8s
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           scan-type: "config"
           scan-ref: "k8s/"

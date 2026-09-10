@@ -81,7 +81,7 @@ jobs:
           tags: ${{ env.ECR_REGISTRY }}/${{ env.FRONTEND_IMAGE }}:${{ steps.set-tag.outputs.tag }}
 
       - name: Scan Frontend Image (Trivy CVE Scan)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           image-ref: ${{ env.ECR_REGISTRY }}/${{ env.FRONTEND_IMAGE }}:${{ steps.set-tag.outputs.tag }}
           format: "table"
@@ -96,7 +96,7 @@ jobs:
           tags: ${{ env.ECR_REGISTRY }}/${{ env.BACKEND_IMAGE }}:${{ steps.set-tag.outputs.tag }}
 
       - name: Scan Backend Image (Trivy CVE Scan)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           image-ref: ${{ env.ECR_REGISTRY }}/${{ env.BACKEND_IMAGE }}:${{ steps.set-tag.outputs.tag }}
           format: "table"

@@ -1010,7 +1010,8 @@ Trigger: pull_request to main or develop (terraform/**, k8s/**, charts/**)
     ├── helm lint charts/taskmanager
     ├── 🔐 Gitleaks: Commit diff & history secret leak detection (.gitleaks.toml)
     ├── 🛡️ Trivy IaC: AWS security misconfiguration scanning on terraform/
-    └── ☸️ Trivy Config: Kubernetes Pod Security Standards scan on k8s/
+    ├── ☸️ Trivy Config: Kubernetes Pod Security Standards scan on k8s/
+    └── 📋 Checkov: CIS AWS & Kubernetes benchmark compliance auditing (.checkov.yaml)
     ↓
 2️⃣  Terraform Plan (Dry-Run Preview):
     ├── OIDC Auth → Terraform Init (S3 Backend)
@@ -1114,6 +1115,7 @@ The platform enforces end-to-end security through 6 defense-in-depth layers acro
 | **Secret Leak Detection** | **Gitleaks** | Automated commit diff & git history scanner in `pr-validation.yml`. Enforces `.gitleaks.toml` allowlists to block accidental credential leaks before merging to `main`. |
 | **IaC Security & SAST** | **Trivy (Config)** | Scans `terraform/` for AWS misconfigurations (open security groups, unencrypted EBS/S3, broad IAM wildcards). |
 | **Kubernetes Compliance** | **Trivy (Config)** | Audits `k8s/*.yaml` against Kubernetes Pod Security Standards (root privileges, missing CPU/mem limits, privilege escalation). |
+| **CIS Benchmark Auditing** | **Checkov** | Deep graph-based compliance engine in `pr-validation.yml` auditing against CIS AWS Foundations and Kubernetes benchmarks. |
 | **Container Image CVEs** | **Trivy (Image)** | Scans built frontend & backend Docker images for OS and library CVEs in `deploy.yml` before ECR promotion. |
 | **Cloud Authentication** | **AWS OIDC Federation** | Short-lived GitHub OIDC tokens (`aws-actions/configure-aws-credentials@v4`). Zero static access keys in GitHub Secrets. |
 | **State File Encryption** | **S3 + DynamoDB** | Terraform state encrypted with AES256; concurrent state mutations protected by DynamoDB distributed locking. |
@@ -1124,6 +1126,7 @@ The platform enforces end-to-end security through 6 defense-in-depth layers acro
 #### Architectural Exception Management
 * **`.gitleaks.toml`**: Custom rules and path allowlists for documentation, test fixtures, and non-sensitive development mock tokens.
 * **`.trivyignore`**: Audited repository exception list for accepted architectural trade-offs (e.g. public ingress load balancer listeners on port 80/443).
+* **`.checkov.yaml`**: Static code analysis configuration and policy suppression for Checkov.
 
 ### Setup Prerequisites
 

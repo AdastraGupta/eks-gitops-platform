@@ -60,6 +60,7 @@ jobs:
       gitleaks_status: ${{ steps.gitleaks.outcome }}
       trivy_iac_status: ${{ steps.trivy_iac.outcome }}
       trivy_k8s_status: ${{ steps.trivy_k8s.outcome }}
+      checkov_status: ${{ steps.checkov.outcome }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -169,6 +170,18 @@ jobs:
           severity: "CRITICAL,HIGH"
           format: "table"
           exit-code: "1"
+        continue-on-error: true
+
+      # ── Checkov IaC Security & Compliance Scan ────────────────────────────
+      - name: Run Checkov IaC & Kubernetes Compliance Scan
+        id: checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: "terraform/"
+          framework: "terraform,kubernetes"
+          output_format: "cli"
+          soft_fail: true
+          quiet: true
         continue-on-error: true
 
       # ── Check overall validation outcome ───────────────────────────────────
@@ -309,8 +322,9 @@ jobs:
             | ☸️ **Kubernetes Manifests** | \`${{ needs.validate.outputs.k8s_status == 'success' && '✅ Passed' || '❌ Failed' }}\` | \`k8s/*.yaml\` syntax check |
             | 📦 **Helm Chart** | \`${{ needs.validate.outputs.helm_status == 'success' && '✅ Passed' || '❌ Failed' }}\` | \`helm lint charts/taskmanager\` |
             | 🔐 **Secret Leak Detection** | \`${{ needs.validate.outputs.gitleaks_status == 'success' && '✅ Clean' || '❌ Secrets Detected' }}\` | Gitleaks scan on PR commits |
-            | 🛡️ **IaC Security (Terraform)** | \`${{ needs.validate.outputs.trivy_iac_status == 'success' && '✅ Passed' || '❌ Issues Found' }}\` | Trivy AWS misconfiguration scan |
-            | 🛡️ **Manifest Security (K8s)** | \`${{ needs.validate.outputs.trivy_k8s_status == 'success' && '✅ Passed' || '❌ Issues Found' }}\` | Trivy Pod Security Standards scan |
+            | 🛡️ **IaC Security (Trivy)** | \`${{ needs.validate.outputs.trivy_iac_status == 'success' && '✅ Passed' || '❌ Issues Found' }}\` | Trivy AWS misconfiguration scan |
+            | 🛡️ **Manifest Security (Trivy)** | \`${{ needs.validate.outputs.trivy_k8s_status == 'success' && '✅ Passed' || '❌ Issues Found' }}\` | Trivy Pod Security Standards scan |
+            | 📋 **IaC Compliance (Checkov)** | \`${{ needs.validate.outputs.checkov_status == 'success' && '✅ Passed' || '⚠️ Audited' }}\` | Checkov CIS benchmark policies |
             | 📋 **Terraform Plan (Dev)** | **${planBadge}** | **+${add} to add, ~${change} to change, -${destroy} to destroy** |
 
             <details>

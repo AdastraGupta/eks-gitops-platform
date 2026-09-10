@@ -510,7 +510,7 @@ graph LR
 └── .github/
     └── workflows/
         ├── dev-pipeline.yml          # CI/CD: Unified Dev deployment (Terraform infra + ArgoCD GitOps k8s/ sync + Smoke tests)
-        ├── terraform.yml             # CI/CD: Terraform plan on PR, auto-apply on push to main, manual destroy
+        ├── terraform.yml             # CI/CD: Terraform plan on PR, auto-apply on push to main, manual plan/apply
         └── deploy.yml                # CI/CD: Build & push ECR images → Deploy Dev → Staging → Prod (sequential)
 ```
 
@@ -1000,7 +1000,6 @@ Three GitHub Actions workflows handle infrastructure, application deployments, a
 | **Push to `main`** | Format → Plan → **auto-apply** (deploys infrastructure) |
 | **Manual: `plan`** | Format → Plan only (dry-run for any environment) |
 | **Manual: `apply`** | Format → Plan → Apply (with GitHub Environment approval gate) |
-| **Manual: `destroy`** | Format → Plan → Destroy (cleans up LB ENIs first) |
 
 **Manual workflow inputs also include component toggles:**
 
@@ -1064,7 +1063,7 @@ Trigger: push to main (terraform/**, k8s/**) or workflow_dispatch
 
 - **AWS OIDC** — No static access keys. GitHub Actions authenticates to AWS via OpenID Connect federation
 - **S3 + DynamoDB** — Terraform state is encrypted at rest in S3 with DynamoDB-based locking
-- **GitHub Environments** — Apply and destroy jobs require environment approval
+- **GitHub Environments** — Production apply jobs require environment approval
 - **Sensitive masking** — `db_password` injected via `${{ secrets.TF_VAR_db_password }}`, never logged
 - **Least-privilege IAM** — Separate OIDC roles for Terraform (`AWS_ROLE_ARN`) and ECR image builds (`AWS_ROLE_ARN_BUILD`)
 
@@ -1152,19 +1151,17 @@ Create a trust policy granting access to `repo:AdastraGE/eks-gitops-platform:*` 
 
 ## Teardown
 
-Via GitHub Actions (recommended):
-```bash
-# Trigger a destroy via the Actions tab → "Terraform — Infrastructure CI/CD" → Run workflow → action: destroy
-```
+To protect cloud infrastructure against accidental deletion, teardown is intentionally excluded from automated CI/CD pipelines and must be executed manually via the Terraform CLI:
 
-Or manually:
 ```bash
 cd terraform
-terraform destroy
-```
 
-> [!NOTE]
-> The GitHub Actions destroy job automatically cleans up LoadBalancer services before destroying the VPC, preventing ENI-related failures.
+# Clean up LoadBalancer services first to release ENIs before VPC destruction
+kubectl delete svc nginx-public-ingress-nginx-controller nginx-internal-ingress-nginx-controller -n ingress-nginx --ignore-not-found=true
+
+# Destroy Terraform-managed resources
+terraform destroy -var-file=environments/dev.tfvars
+```
 
 ## Repository
 

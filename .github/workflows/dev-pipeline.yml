@@ -31,7 +31,6 @@ on:
         options:
           - apply
           - plan
-          - destroy
         default: apply
       force_argocd_sync:
         description: "Force immediate ArgoCD sync for taskmanager app (k8s/)"
@@ -149,13 +148,6 @@ jobs:
         run: terraform apply -auto-approve tfplan.binary
         working-directory: ${{ env.TF_WORKING_DIR }}
 
-      - name: Terraform Destroy (if action is destroy)
-        if: ${{ github.event.inputs.action == 'destroy' }}
-        run: |
-          terraform destroy -auto-approve \
-            -var="environment=dev" \
-            -var="db_password=${{ secrets.TF_VAR_db_password || 'DevSecret123!' }}"
-        working-directory: ${{ env.TF_WORKING_DIR }}
 
       - name: Export Outputs
         id: export-outputs

@@ -1033,7 +1033,7 @@ Trigger: pull_request to main or develop (terraform/**, k8s/**, charts/**)
 | `argocd_enabled` | `true` | Toggle ArgoCD GitOps controller |
 | `tracing_enabled` | `true` | Toggle Jaeger distributed tracing |
 
-### Workflow 2: Application Deployment (`deploy.yml`)
+### Workflow 3: Application Deployment (`deploy.yml`)
 
 Builds Docker images, publishes to AWS ECR, and promotes them sequentially through environments via Helm + ArgoCD.
 
@@ -1053,7 +1053,7 @@ Trigger: push to main (charts/**) or workflow_dispatch
 🔴 PRODUCTION: Bump values-prod.yaml → commit → ArgoCD sync → Health Verification → Teams Alert
 ```
 
-### Workflow 3: Unified Dev Deployment (`dev-pipeline.yml`)
+### Workflow 4: Unified Dev Deployment (`dev-pipeline.yml`)
 
 An end-to-end orchestration pipeline for the **Dev** environment (designed for future expansion to Staging and Prod). It automates infrastructure provisioning via Terraform and deploys application manifests directly from [`k8s/`](file:///c:/Users/Shivam.Gupta/OneDrive - Adastra, s.r.o/Desktop/Github/eks-gitops-platform/k8s) via ArgoCD GitOps, followed by automated smoke testing and markdown summary reporting.
 
@@ -1088,7 +1088,7 @@ Trigger: push to main (terraform/**, k8s/**) or workflow_dispatch
 > [!NOTE]
 > In accordance with GitOps standards for the dev environment, ArgoCD is configured in `terraform/argocd.tf` to pull manifests directly from the root `k8s/` directory (`postgres-service.yaml`, `postgres-secret.yaml`, `backend-deployment.yaml`, `frontend-deployment.yaml`, `ingress.yaml`, etc.), maintaining strict separation from the Helm chart packaging path.
 
-### Workflow 4: Infrastructure Teardown (`destroy.yml`)
+### Workflow 5: Infrastructure Teardown (`destroy.yml`)
 
 A dedicated, isolated workflow for destroying AWS cloud environments with built-in safety controls.
 
@@ -1187,6 +1187,47 @@ Create a trust policy granting access to `repo:AdastraGE/eks-gitops-platform:*` 
 | `TF_STATE_BUCKET` | `your-tf-state-bucket` |
 | `TF_STATE_LOCK_TABLE` | `terraform-state-lock` |
 | `EKS_CLUSTER_NAME` | *(Optional)* `taskmanager-cluster-dev` (overrides cluster name for kubectl authentication) |
+
+**Environments & Approval Gates** (Settings → Environments):
+
+| Environment | Purpose | Protection Rule |
+|---|---|---|
+| `dev-approval` | Gates Terraform apply on Dev (`terraform.yml` & `dev-pipeline.yml`) | Required reviewers |
+| `staging-approval` | Gates Terraform apply on Staging (`terraform.yml`) | Required reviewers |
+| `prod-approval` | Gates Terraform apply on Production (`terraform.yml`) | Required reviewers |
+| `production` | Gates Application deployment to Prod (`deploy.yml`) | Required reviewers |
+| `dev-destroy` / `staging-destroy` / `prod-destroy` | Gates teardown workflow (`destroy.yml`) | Required reviewers |
+
+#### 4. Configure Branch Protection for `main` (Recommended)
+
+To guarantee that broken code or unverified infrastructure changes cannot be merged into `main`:
+
+1. Go to **Settings** → **Branches** → **Add branch protection rule** (or **Rulesets** → **New branch ruleset**).
+2. Set **Branch name pattern** to `main`.
+3. Enable:
+   - ✅ **Require a pull request before merging** (Require at least 1 approval).
+   - ✅ **Require status checks to pass before merging**:
+     - Check **Require branches to be up to date before merging**.
+     - Search and select:
+       - `🔍 Pre-Flight Validation & Linting`
+       - `📋 Terraform Plan (Dry-Run Preview)`
+   - ✅ **Require conversation resolution before merging**.
+   - ✅ **Do not allow bypassing the above settings**.
+4. Click **Save changes**.
+
+Alternatively, configure via GitHub CLI:
+```bash
+gh api \
+  --method PUT \
+  -H "Accept: application/vnd.github+json" \
+  /repos/AdastraGE/eks-gitops-platform/branches/main/protection \
+  -f required_status_checks[strict]=true \
+  -f required_status_checks[contexts][]="🔍 Pre-Flight Validation & Linting" \
+  -f required_status_checks[contexts][]="📋 Terraform Plan (Dry-Run Preview)" \
+  -f enforce_admins=true \
+  -f required_pull_request_reviews[required_approving_review_count]=1 \
+  -f restrictions=null
+```
 
 ## Teardown
 

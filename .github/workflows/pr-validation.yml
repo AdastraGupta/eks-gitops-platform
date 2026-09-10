@@ -50,7 +50,7 @@ jobs:
   # Job 1: Pre-Flight Validation & Linting
   # ════════════════════════════════════════════════════════════════════════════
   validate:
-    name: "🔍 Pre-Flight Validation & Linting"
+    name: "🔍 Pre-Flight Validation"
     runs-on: ubuntu-latest
     outputs:
       fmt_status: ${{ steps.fmt.outcome }}

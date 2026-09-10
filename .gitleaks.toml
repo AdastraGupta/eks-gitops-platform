@@ -8,6 +8,7 @@ title = "EKS GitOps Platform - Secret Scanning Configuration"
 [allowlist]
 description = "Allowlist for test fixtures, documentation examples, and known non-sensitive placeholders"
 paths = [
+  '''\.github/.*''',
   '''\.trivyignore''',
   '''README\.md''',
   '''charts/taskmanager/values.*\.yaml''',

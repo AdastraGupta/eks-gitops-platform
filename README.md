@@ -437,6 +437,97 @@ graph LR
 10. **Multi-Environment Helm Chart (`charts/taskmanager`):**
     - A single parameterized Helm chart with environment-specific values files (`values-dev.yaml`, `values-staging.yaml`, `values-prod.yaml`) that override replica counts, resource requests, image tags, autoscaling settings, TLS configuration, and Karpenter instance types per environment.
 
+## GitOps Platform Management (The Hybrid Two-Tier Pattern)
+
+The platform decouples cloud infrastructure lifecycle from cluster platform & application lifecycle using the **Two-Tier Operating Model**:
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│ TIER 1: Base Cloud Infrastructure (Terraform IaC)                      │
+│ VPC · Subnets · NAT · EKS Cluster · System Nodes · RDS · StorageClass  │
+│ CloudWatch · Karpenter IRSA · K8sGPT IRSA · ArgoCD Controller (Helm)  │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ Bootstraps
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│ TIER 2: Platform & Application Continuous Delivery (ArgoCD GitOps)     │
+│ Root App of Apps: platform-apps (gitops/bootstrap/)                   │
+│   ├── Wave 1: Ingress-Public, Ingress-Internal, Metrics-Server        │
+│   ├── Wave 2: Prometheus & Grafana, Elasticsearch, KEDA Controller    │
+│   └── Wave 3: Fluent Bit DaemonSet, Kibana Dashboard, Jaeger Tracing   │
+│ Root Application: taskmanager (k8s/ & charts/taskmanager)              │
+│   └── Frontend, Backend API, Ingress Routing, PDB, ScaledObjects      │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+### Ordered Sync Waves Matrix
+
+ArgoCD enforces deterministic startup order using `argocd.argoproj.io/sync-wave` annotations:
+
+| Sync Wave | Application | Chart / Component | Namespace | Role & Dependencies |
+|---|---|---|---|---|
+| **Wave 1** | `ingress-nginx-public` | `ingress-nginx` 4.10.1 | `ingress-nginx` | Provisions internet-facing AWS NLB in public subnets |
+| **Wave 1** | `ingress-nginx-internal` | `ingress-nginx` 4.10.1 | `ingress-nginx` | Provisions private VPC-internal AWS NLB for admin tools |
+| **Wave 1** | `metrics-server` | `metrics-server` 3.12.1 | `kube-system` | Core CPU/memory telemetry API required for HPA |
+| **Wave 2** | `kube-prometheus-stack` | `kube-prometheus-stack` 61.3.1 | `monitoring` | Prometheus TSDB (10Gi gp3), Alertmanager, Grafana |
+| **Wave 2** | `efk-elasticsearch` | `elasticsearch` 8.5.1 | `logging` | Search & index cluster (10Gi gp3 storage) |
+| **Wave 2** | `keda` | `keda` 2.15.1 | `keda` | Event-driven autoscaler operator & metrics adapter |
+| **Wave 3** | `efk-fluent-bit` | `fluent-bit` 0.47.10 | `logging` | Cluster log shipper DaemonSet (ships to Elasticsearch) |
+| **Wave 3** | `efk-kibana` | `kibana` 8.5.1 | `logging` | Log visualizer UI (connects to Elasticsearch) |
+| **Wave 3** | `jaeger` | `jaeger` 3.0.12 | `tracing` | Distributed tracing (Collector, Agent DaemonSet, UI; persists to ES) |
+
+### How to Add a New Platform Component
+To add a new platform tool to the cluster:
+1. Create a declarative ArgoCD Application manifest in `gitops/platform/<tool-name>.yaml`.
+2. Set the appropriate `sync-wave` annotation based on dependencies.
+3. Commit and push to `main` — the `platform-apps` root application automatically discovers and provisions it.
+
+## Dual Ingress Architecture & Network Isolation
+
+Security and compliance best practices mandate that administrative dashboards (Grafana, Kibana, ArgoCD, Jaeger) must **never** be exposed to the public internet. This platform deploys two isolated Nginx Ingress Controllers:
+
+```
+                  ┌───────────────────────────────┐
+                  │      Dual Ingress Layer       │
+                  └───────────────┬───────────────┘
+                                  │
+         ┌────────────────────────┴────────────────────────┐
+         │                                                 │
+         ▼                                                 ▼
+┌─────────────────────────────────┐       ┌─────────────────────────────────┐
+│ Public Ingress (nginx-public)   │       │ Internal Ingress (nginx-internal│
+│ Internet-Facing AWS NLB         │       │ VPC-Only AWS NLB (Private CIDR) │
+├─────────────────────────────────┤       ├─────────────────────────────────┤
+│ • /    → Frontend UI            │       │ • /grafana → Monitoring         │
+│ • /api → PostgREST Backend      │       │ • /kibana  → Logging            │
+│ • SSL Terminated via ACM        │       │ • /argocd  → GitOps Server      │
+│ • CloudFront Edge CDN caching   │       │ • /jaeger  → Distributed Traces │
+└─────────────────────────────────┘       └─────────────────────────────────┘
+```
+
+### Cross-Namespace Service Routing Pattern
+Kubernetes Ingress resources cannot natively route traffic across namespaces. To avoid creating cluster-wide ingress privileges, `k8s/ingress-internal.yaml` uses **Kubernetes `ExternalName` Services** in the `ingress-nginx` namespace:
+- `grafana-external` → `kube-prometheus-stack-grafana.monitoring.svc.cluster.local`
+- `kibana-external` → `kibana-kibana.logging.svc.cluster.local`
+- `argocd-external` → `argocd-server.argocd.svc.cluster.local`
+- `jaeger-external` → `jaeger-query.tracing.svc.cluster.local`
+
+This ensures that administrative services remain strictly `ClusterIP` within their respective namespaces, accessible only via the internal NLB.
+
+## Shared Storage Architecture (EBS gp3)
+
+Persistent state for observability and storage-backed workloads is managed via AWS EBS `gp3` volumes provisioned dynamically by the AWS EBS CSI Driver:
+
+- **StorageClass (`terraform/storage.tf`)**:
+  - `name: gp3` — Marked as cluster default (`storageclass.kubernetes.io/is-default-class = "true"`).
+  - `volumeBindingMode: WaitForFirstConsumer` — Delays EBS volume creation until a pod is scheduled, ensuring the volume is created in the exact AWS Availability Zone where the pod's node is located.
+  - `allowVolumeExpansion: true` — Allows dynamic volume resizing without pod recreation or cluster downtime.
+  - `reclaimPolicy: Retain` — Prevents accidental data loss by keeping EBS snapshots/volumes if PVCs are deleted.
+- **Consumer Workloads**:
+  - **Elasticsearch**: 10Gi gp3 volume for search indices and cluster state.
+  - **Prometheus**: 10Gi gp3 volume for time-series metrics database (TSDB).
+  - **Alertmanager**: 5Gi gp3 volume for alert deduplication and notification state.
+
 ## Tech Stack
 
 | Layer | Technology |
@@ -510,6 +601,12 @@ graph LR
 │       ├── values-staging.yaml       # STAGING overrides: 2 replicas, staging RDS, integration TLS
 │       ├── values-prod.yaml          # PROD overrides: 3+ replicas, HPA + KEDA, On-Demand Karpenter, ACM TLS
 │       └── templates/                # Helm templates (deployment, service, ingress, HPA, KEDA, PDB, etc.)
+│
+├── app/                              # Application container source & build specifications
+│   ├── Dockerfile.frontend           # Multi-stage Docker build for React SPA (served by Nginx 1.25-alpine)
+│   ├── Dockerfile.backend            # PostgREST v12.2.3 REST API container image definition
+│   ├── nginx.conf                    # Nginx web server config (gzip, security headers, SPA client-side routing)
+│   └── cicd.yml                      # Container build, security scan, and ECR push pipeline script
 │
 ├── terraform/                        # Tier 1: Cloud & Kubernetes Base Infrastructure (IaC)
 │   ├── versions.tf                   # Terraform version (>= 1.6.0), required providers & S3 backend config
@@ -983,6 +1080,54 @@ kubectl exec -n logging elasticsearch-master-0 -- curl -s -X DELETE 'http://loca
 > [!NOTE]
 > For automated index lifecycle management (ILM), configure an ILM policy in Kibana under **Stack Management → Index Lifecycle Policies**.
 
+## Jaeger Distributed Tracing
+
+End-to-end distributed tracing across microservice transactions is handled by **Jaeger 3.0**, declaratively deployed via ArgoCD ([`gitops/platform/tracing.yaml`](gitops/platform/tracing.yaml)).
+
+### Architecture & Data Flow
+
+```
+Microservices / Pods
+      │ (OTLP / Jaeger Spans)
+      ▼
+Jaeger Agent DaemonSet (per-node batching)
+      │ (gRPC :4317 / HTTP :4318)
+      ▼
+Jaeger Collector Deployment (stateless ingestion)
+      │ (Bulk Indexing API)
+      ▼
+Elasticsearch Cluster (logging namespace)
+      ▲
+      │ (Search Queries)
+Jaeger Query UI Deployment (:16686)
+      ▲
+      │ (/jaeger subpath via nginx-internal)
+Internal NLB / DevOps VPN
+```
+
+- **Stateless Architecture**: Traces are written directly to the shared **Elasticsearch** cluster (`http://elasticsearch-master.logging.svc.cluster.local:9200`), eliminating the need for separate database storage or PVCs in the `tracing` namespace.
+- **OTLP Endpoints**: Exposes standard OpenTelemetry Protocol (OTLP) endpoints:
+  - gRPC: `jaeger-collector.tracing.svc.cluster.local:4317`
+  - HTTP: `jaeger-collector.tracing.svc.cluster.local:4318`
+
+### Accessing Jaeger UI
+
+```bash
+# Check ArgoCD sync status
+kubectl get application jaeger -n argocd
+
+# Check Jaeger pod health
+kubectl get pods -n tracing
+
+# Option A: Via Internal Ingress
+kubectl port-forward svc/nginx-internal-ingress-nginx-controller 8080:80 -n ingress-nginx
+# Open http://localhost:8080/jaeger
+
+# Option B: Direct port-forward
+kubectl port-forward svc/jaeger-query 16686:16686 -n tracing
+# Open http://localhost:16686
+```
+
 ## Prometheus & Grafana Monitoring
 
 The cluster includes a production-ready **Prometheus + Grafana + Alertmanager** stack declaratively managed by ArgoCD via the official `kube-prometheus-stack` Helm chart ([`gitops/platform/monitoring.yaml`](gitops/platform/monitoring.yaml)).
@@ -1023,10 +1168,25 @@ Alerts include:
 
 The **K8sGPT Operator** continuously scans all Kubernetes objects, sends failure context to **AWS Bedrock (Anthropic Claude 3 Haiku)**, and returns plain-English root-cause diagnoses with exact remediation commands.
 
-### Authentication (Zero Secrets via IRSA)
+### Authentication & Security Architecture (Zero Secrets via IRSA)
 
-- `aws_iam_policy.k8sgpt_bedrock` — Grants `bedrock:InvokeModel` for Claude 3 Haiku/Sonnet only
-- `module.k8sgpt_irsa_role` — Binds the IAM role to the `k8sgpt:k8sgpt-operator` ServiceAccount via OIDC
+K8sGPT uses **IAM Roles for Service Accounts (IRSA)** for passwordless, zero-secret authentication with AWS Bedrock:
+
+1. **OIDC Token Projection**: EKS mounts a short-lived, cryptographically signed JSON Web Token (JWT) into the `k8sgpt-operator` pod at `/var/run/secrets/eks.amazonaws.com/serviceaccount/token`.
+2. **AWS STS AssumeRole**: The AWS SDK inside the K8sGPT container calls `sts:AssumeRoleWithWebIdentity`, presenting the projected JWT token.
+3. **Role Validation**: AWS STS validates the token against the EKS cluster's OpenID Connect (OIDC) identity provider.
+4. **Temporary Credentials**: STS issues temporary, scoped AWS credentials (valid for 1 hour) directly in container memory. No static API keys (`AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY`) ever exist on disk or in Kubernetes secrets.
+5. **Least-Privilege Scoping**:
+   - `aws_iam_policy.k8sgpt_bedrock` (`terraform/k8sgpt.tf`) strictly limits actions to `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream`.
+   - Resource ARNs are locked down to Anthropic Claude foundation models (`anthropic.claude-3-haiku-20240307-v1:0` and `anthropic.claude-3-5-sonnet-20240620-v1:0`).
+
+### Data Privacy & Anonymization Engine
+
+Before sending Kubernetes error logs or resource manifests to AWS Bedrock, K8sGPT runs an **in-cluster anonymization engine** (`k8sgpt_anonymize = true`):
+- Masking of IP addresses (IPv4/IPv6)
+- Masking of container environment variables and Secret references
+- Redaction of sensitive workload identifiers and namespace names
+- Zero external data leakage: all scrubbing occurs locally in memory before the HTTPS payload is transmitted to the Bedrock endpoint.
 
 ### Configuration
 

@@ -1,0 +1,220 @@
+# ─── Prometheus + Grafana Monitoring Stack ────────────────────────────────────
+#
+# Deploys the complete Kubernetes monitoring stack via the official
+# prometheus-community/kube-prometheus-stack Helm chart.
+#
+# Stack includes:
+#   - Prometheus Operator     : Manages Prometheus & Alertmanager CRDs
+#   - Prometheus Server       : Pulls & stores metrics (TSDB on EBS gp3, 20Gi)
+#   - Alertmanager            : Deduplicates, groups & routes alerts to MS Teams
+#   - Grafana                 : Rich visual dashboards (served via internal Ingress)
+#   - node-exporter           : Host-level hardware/OS metrics (CPU, RAM, disk)
+#   - kube-state-metrics      : Kubernetes object metrics (deployments, pods)
+#
+# Access:
+#   Grafana: http://<internal-nlb-ip>/grafana  (requires VPN or kubectl port-forward)
+#   Default admin credentials: stored in the 'kube-prometheus-stack-grafana' secret
+#   in the monitoring namespace. Retrieve with:
+#     kubectl get secret -n monitoring kube-prometheus-stack-grafana \
+#       -o jsonpath="{.data.admin-password}" | base64 -d
+#
+# Alertmanager MS Teams routing:
+#   Configure the webhook URL as a Kubernetes Secret post-install and reference it
+#   from your Alertmanager config. See the alertmanager section below.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kube-prometheus-stack
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    # Sync Wave 2: Monitoring deploys after Ingress controllers are ready
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: default
+
+  source:
+    repoURL: 'https://prometheus-community.github.io/helm-charts'
+    chart: kube-prometheus-stack
+    targetRevision: '61.3.1'
+    helm:
+      releaseName: kube-prometheus-stack
+      # ServerSideApply is required for this chart — its CRDs exceed the annotation
+      # size limit of the default client-side apply strategy.
+      values: |
+        # ── Grafana Configuration ──────────────────────────────────────────────
+        grafana:
+          enabled: true
+
+          # ClusterIP — served via internal Ingress Controller (nginx-internal).
+          # Access: http://<INTERNAL-NLB-IP>/grafana (requires VPN or kubectl port-forward)
+          service:
+            type: ClusterIP
+            port: 80
+
+          # root_url so links/redirects work correctly behind /grafana subpath
+          grafana_ini:
+            server:
+              root_url: "%(protocol)s://%(domain)s/grafana/"
+              serve_from_sub_path: true
+
+          defaultDashboardsEnabled: true
+          defaultDashboardsEditable: false
+
+          sidecar:
+            dashboards:
+              enabled: true
+              searchNamespace: ALL
+            datasources:
+              enabled: true
+              searchNamespace: ALL
+
+          # Pre-configured Jaeger tracing data source for Grafana
+          additionalDataSources:
+            - name: Jaeger
+              type: jaeger
+              access: proxy
+              url: "http://jaeger-query.tracing.svc.cluster.local:16686/jaeger"
+              isDefault: false
+              jsonData:
+                nodeGraph:
+                  enabled: true
+
+          # Pin Grafana to system_nodes — never co-locate with app workloads
+          nodeSelector:
+            nodegroup: system
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
+        # ── Prometheus Server Configuration ────────────────────────────────────
+        prometheus:
+          enabled: true
+
+          prometheusSpec:
+            retention: "7d"
+
+            # Allow discovering ServiceMonitors, PodMonitors, and Rules across ALL namespaces.
+            # Required so KEDA, Fluent Bit, and app-level ServiceMonitors are picked up.
+            serviceMonitorSelectorNilUsesHelmValues: false
+            podMonitorSelectorNilUsesHelmValues: false
+            ruleSelectorNilUsesHelmValues: false
+
+            # Persistent Storage via EBS gp3 (gp3 StorageClass provisioned by Terraform)
+            storageSpec:
+              volumeClaimTemplate:
+                spec:
+                  storageClassName: gp3
+                  accessModes:
+                    - ReadWriteOnce
+                  resources:
+                    requests:
+                      storage: "20Gi"
+
+            # Pin Prometheus StatefulSet to system_nodes (holds persistent TSDB volume)
+            nodeSelector:
+              nodegroup: system
+
+            resources:
+              requests:
+                cpu: "200m"
+                memory: "512Mi"
+              limits:
+                cpu: "1000m"
+                memory: "1536Mi"
+
+            # Scrape PostgREST API /metrics endpoint automatically
+            additionalScrapeConfigs:
+              - job_name: "postgrest-backend"
+                metrics_path: "/metrics"
+                kubernetes_sd_configs:
+                  - role: pod
+                    namespaces:
+                      names:
+                        - taskmanager
+                relabel_configs:
+                  - source_labels: ["__meta_kubernetes_pod_label_app"]
+                    action: keep
+                    regex: "backend"
+                  - source_labels: ["__meta_kubernetes_pod_container_port_number"]
+                    action: keep
+                    regex: "3000"
+
+        # ── Alertmanager Configuration ──────────────────────────────────────────
+        alertmanager:
+          enabled: true
+
+          alertmanagerSpec:
+            retention: "120h"
+
+            storage:
+              volumeClaimTemplate:
+                spec:
+                  storageClassName: gp3
+                  accessModes:
+                    - ReadWriteOnce
+                  resources:
+                    requests:
+                      storage: "5Gi"
+
+            # Pin Alertmanager to system_nodes
+            nodeSelector:
+              nodegroup: system
+
+            resources:
+              requests:
+                cpu: "50m"
+                memory: "64Mi"
+              limits:
+                cpu: "200m"
+                memory: "256Mi"
+
+          # MS Teams routing config.
+          # To enable: create a secret with your webhook URL and reference it here,
+          # or update this config inline after deployment.
+          config:
+            global:
+              resolve_timeout: "5m"
+            route:
+              group_by: ["alertname", "namespace", "job"]
+              group_wait: "30s"
+              group_interval: "5m"
+              repeat_interval: "12h"
+              receiver: "null"
+            receivers:
+              - name: "null"
+
+        # ── Node Exporter (Hardware / Host Metrics) ────────────────────────────
+        nodeExporter:
+          enabled: true
+
+        # ── kube-state-metrics (Cluster / Workload Metrics) ────────────────────
+        kubeStateMetrics:
+          enabled: true
+
+        # ── Prometheus Operator ────────────────────────────────────────────────
+        # Pins prometheus-operator admission webhooks to system_nodes.
+        # node-exporter is a DaemonSet and intentionally runs on ALL nodes.
+        prometheusOperator:
+          nodeSelector:
+            nodegroup: system
+
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: monitoring
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true    # Required for large CRDs in kube-prometheus-stack
+      - Replace=true            # Replace CRDs instead of patching (avoids annotation size limits)

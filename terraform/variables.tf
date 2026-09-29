@@ -127,18 +127,6 @@ variable "app_node_desired_size" {
 
 # ─── EFK Logging Stack ─────────────────────────────────────────────────────────
 
-variable "efk_enabled" {
-  description = "Enable the EFK (Elasticsearch, Fluent Bit, Kibana) logging stack."
-  type        = bool
-  default     = true
-}
-
-variable "efk_elasticsearch_volume_size" {
-  description = "Size of the EBS gp3 PersistentVolume for Elasticsearch data (in Gi)."
-  type        = number
-  default     = 10
-}
-
 # ─── RDS PostgreSQL ────────────────────────────────────────────────────────────
 
 variable "rds_instance_class" {
@@ -172,19 +160,7 @@ variable "db_password" {
   default     = "postgres123"
 }
 
-# ─── Prometheus + Grafana Monitoring Stack ────────────────────────────────────
-
-variable "monitoring_enabled" {
-  description = "Enable the Prometheus + Grafana monitoring stack via Helm (kube-prometheus-stack)."
-  type        = bool
-  default     = true
-}
-
-variable "monitoring_prometheus_volume_size" {
-  description = "Size of the EBS gp3 PersistentVolume for Prometheus metrics storage (in Gi)."
-  type        = number
-  default     = 10
-}
+# ─── Notifications & Webhooks ────────────────────────────────────────────────
 
 variable "teams_webhook_url" {
   description = "Microsoft Teams incoming webhook URL for Alertmanager and CI/CD alerts."
@@ -202,12 +178,6 @@ variable "argocd_enabled" {
 }
 
 # ─── Jaeger Distributed Tracing ───────────────────────────────────────────────
-
-variable "tracing_enabled" {
-  description = "Enable Jaeger distributed tracing stack via Helm (jaegertracing/jaeger chart)."
-  type        = bool
-  default     = true
-}
 
 # ─── K8sGPT — AI-Powered SRE Operator ────────────────────────────────────────
 
@@ -239,12 +209,6 @@ variable "karpenter_enabled" {
 }
 
 # ─── KEDA: Event-Driven Pod Autoscaler ───────────────────────────────────────
-
-variable "keda_enabled" {
-  description = "Enable KEDA event-driven pod autoscaling. Also installs Kubernetes Metrics Server required for HPA CPU/Memory triggers."
-  type        = bool
-  default     = true
-}
 
 # ─── SSL / DNS (ACM + Route 53) ────────────────────────────────────────────────
 

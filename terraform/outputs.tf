@@ -108,7 +108,8 @@ output "cloudwatch_dashboard_url" {
   value       = "https://${var.aws_region}.console.aws.amazon.com/cloudwatch/home?region=${var.aws_region}#dashboards:name=${aws_cloudwatch_dashboard.taskmanager.dashboard_name}"
 }
 
-# ─── EFK Logging Stack (Helm) ──────────────────────────────────────────────────
+# ─── EFK Logging Stack (ArgoCD-managed) ────────────────────────────────────────
+# EFK is now managed by ArgoCD via gitops/platform/efk.yaml
 
 output "public_lb_url_command" {
   description = "Get the Public NLB hostname for frontend + backend API access."
@@ -121,58 +122,60 @@ output "internal_lb_url_command" {
 }
 
 output "kibana_access_info" {
-  description = "Kibana is now served via the internal NLB at /kibana. Access via VPN or port-forward."
-  value       = var.efk_enabled ? "kubectl port-forward svc/nginx-internal-ingress-nginx-controller 8080:80 -n ingress-nginx  # then open http://localhost:8080/kibana" : "EFK stack is disabled (efk_enabled = false)"
+  description = "Kibana is served via the internal NLB at /kibana (managed by ArgoCD). Access via VPN or port-forward."
+  value       = "kubectl port-forward svc/nginx-internal-ingress-nginx-controller 8080:80 -n ingress-nginx  # then open http://localhost:8080/kibana"
 }
 
 output "efk_status_command" {
-  description = "Command to check the health of all EFK stack pods."
-  value       = var.efk_enabled ? "kubectl get pods -n logging" : "EFK stack is disabled (efk_enabled = false)"
+  description = "Check the health of all EFK stack pods (deployed by ArgoCD from gitops/platform/efk.yaml)."
+  value       = "kubectl get pods -n logging"
 }
 
 output "elasticsearch_health_command" {
-  description = "Command to check the Elasticsearch cluster health."
-  value       = var.efk_enabled ? "kubectl exec -n logging elasticsearch-master-0 -- curl -s http://localhost:9200/_cluster/health?pretty" : "EFK stack is disabled (efk_enabled = false)"
+  description = "Check the Elasticsearch cluster health."
+  value       = "kubectl exec -n logging elasticsearch-master-0 -- curl -s http://localhost:9200/_cluster/health?pretty"
 }
 
-output "efk_helm_releases" {
-  description = "Helm releases deployed for the EFK logging stack."
-  value       = var.efk_enabled ? "helm list -n logging" : "EFK stack is disabled (efk_enabled = false)"
+output "efk_argocd_apps" {
+  description = "Check ArgoCD sync status for all EFK applications."
+  value       = "kubectl get applications efk-elasticsearch efk-fluent-bit efk-kibana -n argocd"
 }
 
-# ─── Prometheus + Grafana Monitoring (Helm) ───────────────────────────────────
+
+# ─── Prometheus + Grafana Monitoring (ArgoCD-managed) ───────────────────────────
+# Monitoring is now managed by ArgoCD via gitops/platform/monitoring.yaml
 
 output "grafana_access_command" {
-  description = "Grafana is now served via the internal NLB at /grafana. Access via VPN or port-forward."
-  value       = var.monitoring_enabled ? "kubectl port-forward svc/nginx-internal-ingress-nginx-controller 8080:80 -n ingress-nginx  # then open http://localhost:8080/grafana" : "Monitoring stack is disabled (monitoring_enabled = false)"
-}
-
-output "grafana_admin_password" {
-  description = "Auto-generated secure admin password for Grafana. Retrieve with: terraform output -raw grafana_admin_password"
-  value       = var.monitoring_enabled ? random_password.grafana_admin[0].result : "N/A"
-  sensitive   = true
+  description = "Grafana is served via the internal NLB at /grafana (managed by ArgoCD). Access via VPN or port-forward."
+  value       = "kubectl port-forward svc/nginx-internal-ingress-nginx-controller 8080:80 -n ingress-nginx  # then open http://localhost:8080/grafana"
 }
 
 output "monitoring_status_command" {
   description = "Command to check the health of all Prometheus + Grafana monitoring pods."
-  value       = var.monitoring_enabled ? "kubectl get pods -n monitoring" : "Monitoring stack is disabled (monitoring_enabled = false)"
+  value       = "kubectl get pods -n monitoring"
 }
 
-output "monitoring_helm_releases" {
-  description = "Helm releases deployed for the monitoring stack."
-  value       = var.monitoring_enabled ? "helm list -n monitoring" : "Monitoring stack is disabled (monitoring_enabled = false)"
+output "monitoring_argocd_app" {
+  description = "Check ArgoCD sync status for Prometheus + Grafana monitoring stack."
+  value       = "kubectl get application kube-prometheus-stack -n argocd"
 }
 
-# ─── Jaeger Distributed Tracing (Helm) ────────────────────────────────────────
+# ─── Jaeger Distributed Tracing (ArgoCD-managed) ──────────────────────────────
+# Tracing is now managed by ArgoCD via gitops/platform/tracing.yaml
 
 output "jaeger_access_command" {
   description = "Jaeger UI is served via the internal NLB at /jaeger. Access via VPN or port-forward."
-  value       = var.tracing_enabled ? "kubectl port-forward svc/nginx-internal-ingress-nginx-controller 8080:80 -n ingress-nginx  # then open http://localhost:8080/jaeger" : "Tracing stack is disabled (tracing_enabled = false)"
+  value       = "kubectl port-forward svc/nginx-internal-ingress-nginx-controller 8080:80 -n ingress-nginx  # then open http://localhost:8080/jaeger"
 }
 
 output "tracing_status_command" {
   description = "Command to check the health of all Jaeger tracing pods."
-  value       = var.tracing_enabled ? "kubectl get pods -n tracing" : "Tracing stack is disabled (tracing_enabled = false)"
+  value       = "kubectl get pods -n tracing"
+}
+
+output "tracing_argocd_app" {
+  description = "Check ArgoCD sync status for Jaeger distributed tracing."
+  value       = "kubectl get application jaeger -n argocd"
 }
 
 # ─── K8sGPT — AI-Powered SRE (AWS Bedrock) ───────────────────────────────────
@@ -209,16 +212,22 @@ output "karpenter_interruption_queue" {
   value       = var.karpenter_enabled ? aws_sqs_queue.karpenter_interruption[0].arn : "Karpenter is disabled (karpenter_enabled = false)"
 }
 
-# ─── KEDA Event-Driven Autoscaler ─────────────────────────────────────────────
+# ─── KEDA Event-Driven Autoscaler (ArgoCD-managed) ─────────────────────────────
+# KEDA is now managed by ArgoCD via gitops/platform/keda.yaml
 
 output "keda_status_command" {
   description = "Check KEDA controller pod health and all active ScaledObjects in the cluster."
-  value       = var.keda_enabled ? "kubectl get pods -n keda && kubectl get scaledobjects -A" : "KEDA is disabled (keda_enabled = false)"
+  value       = "kubectl get pods -n keda && kubectl get scaledobjects -A"
 }
 
 output "keda_hpa_command" {
   description = "View all HPA resources managed by KEDA for the taskmanager namespace."
-  value       = var.keda_enabled ? "kubectl get hpa -n taskmanager" : "KEDA is disabled (keda_enabled = false)"
+  value       = "kubectl get hpa -n taskmanager"
+}
+
+output "keda_argocd_apps" {
+  description = "Check ArgoCD sync status for KEDA and Metrics Server."
+  value       = "kubectl get applications keda metrics-server -n argocd"
 }
 
 output "autoscaling_observe_command" {

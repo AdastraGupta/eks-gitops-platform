@@ -26,15 +26,6 @@
 name: "Terraform — Infrastructure CI/CD"
 
 on:
-
-
-  # ── Push to main: auto-apply after successful plan ───────────────────────
-  push:
-    branches: [main]
-    paths:
-      - "terraform/**"
-      - ".github/workflows/terraform.yml"
-
   # ── Manual trigger: plan or apply ────────────────────────────────────────
   workflow_dispatch:
     inputs:
@@ -55,23 +46,8 @@ on:
           - staging
           - prod
         default: dev
-      efk_enabled:
-        description: "Deploy EFK logging stack?"
-        required: false
-        type: boolean
-        default: true
-      monitoring_enabled:
-        description: "Deploy Prometheus + Grafana monitoring stack?"
-        required: false
-        type: boolean
-        default: true
       argocd_enabled:
         description: "Deploy ArgoCD GitOps controller via Helm?"
-        required: false
-        type: boolean
-        default: true
-      tracing_enabled:
-        description: "Deploy Jaeger distributed tracing stack via Helm?"
         required: false
         type: boolean
         default: true
@@ -85,23 +61,18 @@ on:
         required: false
         type: boolean
         default: true
-      keda_enabled:
-        description: "Deploy KEDA event-driven pod autoscaler + Kubernetes Metrics Server?"
-        required: false
-        type: boolean
-        default: true
 
 # ── Concurrency: prevent parallel runs on the same branch ──────────────────
 concurrency:
   group: terraform-${{ github.ref }}
-  cancel-in-progress: false  # Never cancel in-progress applies
+  cancel-in-progress: false # Never cancel in-progress applies
 
 # ── Permissions: minimal required for OIDC + PR comments ───────────────────
 permissions:
-  id-token: write       # Required for OIDC authentication with AWS
-  contents: read        # Required to checkout the repository
-  pull-requests: write  # Required to post plan output as PR comment
-  issues: write         # Required for workflow_dispatch status comments
+  id-token: write # Required for OIDC authentication with AWS
+  contents: read # Required to checkout the repository
+  pull-requests: write # Required to post plan output as PR comment
+  issues: write # Required for workflow_dispatch status comments
 
 # ── Environment Variables ──────────────────────────────────────────────────
 env:
@@ -218,13 +189,9 @@ jobs:
         run: |
           terraform plan \
             -var="environment=${{ github.event.inputs.environment || 'dev' }}" \
-            -var="efk_enabled=${{ github.event.inputs.efk_enabled || 'true' }}" \
-            -var="monitoring_enabled=${{ github.event.inputs.monitoring_enabled || 'true' }}" \
             -var="argocd_enabled=${{ github.event.inputs.argocd_enabled || 'true' }}" \
-            -var="tracing_enabled=${{ github.event.inputs.tracing_enabled || 'true' }}" \
             -var="k8sgpt_enabled=${{ github.event.inputs.k8sgpt_enabled || 'true' }}" \
             -var="karpenter_enabled=${{ github.event.inputs.karpenter_enabled || 'true' }}" \
-            -var="keda_enabled=${{ github.event.inputs.keda_enabled || 'true' }}" \
             -detailed-exitcode \
             -no-color \
             -out=tfplan \
@@ -251,8 +218,6 @@ jobs:
             echo "destroy=$DESTROY" >> $GITHUB_OUTPUT
           fi
         working-directory: ${{ env.TF_WORKING_DIR }}
-
-
 
       # ── Send MS Teams Notification (Plan) ──────────────────────────────────
       - name: Send MS Teams Notification (Plan)
@@ -537,6 +502,3 @@ jobs:
             } catch (err) {
               console.error('Error sending Teams notification:', err);
             }
-
-
-

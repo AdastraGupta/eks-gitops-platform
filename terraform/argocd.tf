@@ -252,10 +252,64 @@ resource "helm_release" "argocd" {
       }
     }
 
-    # ── Auto-provision taskmanager Application ──────────────────────────────────
-    # ArgoCD immediately starts syncing k8s/ from GitHub once Helm finishes.
+    # ── Auto-provision Applications ─────────────────────────────────────────────
+    # ArgoCD immediately starts syncing from GitHub once Helm finishes.
     # Replaces the manual: kubectl apply -f k8s/argocd-app.yaml
+    #
+    # Two root applications are registered:
+    #   1. platform-apps  → gitops/bootstrap/ → discovers gitops/platform/*.yaml
+    #      (Ingress, Monitoring, EFK, Tracing, KEDA — all platform Helm charts)
+    #   2. taskmanager    → k8s/
+    #      (Frontend, Backend, Ingress rules, KEDA ScaledObjects)
     additionalApplications = [
+
+      # ── 1. Platform Root App of Apps ──────────────────────────────────────────
+      # Points to gitops/bootstrap/ which contains platform-apps.yaml.
+      # ArgoCD then reads gitops/platform/ and deploys every *.yaml there.
+      # To add a new platform tool: create gitops/platform/<tool>.yaml + git push.
+      {
+        name       = "platform-apps"
+        namespace  = "argocd"
+        project    = "default"
+        finalizers = ["resources-finalizer.argocd.argoproj.io"]
+
+        labels = {
+          app         = "platform"
+          environment = var.environment
+        }
+
+        source = {
+          repoURL        = "https://github.com/AdastraGE/eks-gitops-platform.git"
+          targetRevision = "main"
+          path           = "gitops/bootstrap" # Root App of Apps — reads gitops/platform/
+        }
+
+        destination = {
+          server    = "https://kubernetes.default.svc"
+          namespace = "argocd"
+        }
+
+        syncPolicy = {
+          automated = {
+            prune    = true
+            selfHeal = true
+          }
+          syncOptions = [
+            "CreateNamespace=true",
+            "ServerSideApply=true",
+          ]
+          retry = {
+            limit = 5
+            backoff = {
+              duration    = "5s"
+              factor      = 2
+              maxDuration = "3m"
+            }
+          }
+        }
+      },
+
+      # ── 2. Taskmanager Application (Frontend + Backend) ───────────────────────
       {
         name       = "taskmanager"
         namespace  = "argocd"
@@ -312,6 +366,7 @@ resource "helm_release" "argocd" {
 
   depends_on = [
     module.eks,
-    helm_release.ingress_nginx_internal,
+    # Note: ingress_nginx_internal removed from depends_on — it is now managed
+    # by ArgoCD (gitops/platform/ingress-internal.yaml) not Terraform.
   ]
 }

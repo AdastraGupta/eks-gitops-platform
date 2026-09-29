@@ -1,0 +1,283 @@
+# ─── Spring Boot Backend CI/CD Pipeline ───────────────────────────────────────
+#
+# Pipeline flow:
+#
+#  Trigger(push/PR)
+#    └── build-test        (JDK 17, Maven unit tests + package JAR)
+#          └── code-quality (Semgrep SAST + OWASP dep-check + SonarCloud)
+#                └── build-image (Docker build + Trivy scan + push GHCR)
+#                      └── deploy-dev (Helm, 1 replica, auto)
+#                            └── integration-tests (Maven vs dev endpoint)
+#                                  └── deploy-staging (Helm, 2 replicas, auto)
+#                                        └── [manual approval gate]
+#                                              └── deploy-prod (canary 10% -> 100%)
+#                                                    └── rollback-prod (on failure)
+#
+# Triggers:
+#   push to main/develop  → full pipeline
+#   pull_request to main  → build-test + code-quality + build-image only
+#
+# Path filter: only runs when backend source files change.
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: Backend CI/CD (Spring Boot)
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "backend/**" # All backend source files
+      - "pom.xml"
+      - "Dockerfile.backend"
+      - ".github/workflows/backend-cicd.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "pom.xml"
+      - "Dockerfile.backend"
+
+env:
+  # Image pushed to GitHub Container Registry as ghcr.io/<org>/<repo>-backend:<sha>
+  IMAGE_NAME: ${{ github.repository }}-backend
+  REGISTRY: ghcr.io
+
+jobs:
+  # ─── 1. BUILD & TEST ────────────────────────────────────────────────────────
+  build-test:
+    name: Build & Unit Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+          cache: "maven" # caches ~/.m2 between runs for faster builds
+
+      - name: Run unit tests
+        run: mvn -B test
+
+      # Publishes Surefire XML reports as a GitHub check with per-test results
+      - name: Publish test report
+        if: always() # run even when tests fail so report is visible
+        uses: dorny/test-reporter@v1
+        with:
+          name: Maven Tests
+          path: target/surefire-reports/*.xml
+          reporter: java-junit
+
+      - name: Build JAR
+        run: mvn -B package -DskipTests
+
+      # Pass the JAR to the build-image job without re-compiling
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-jar
+          path: target/*.jar
+          retention-days: 1 # short retention — only needed within this pipeline run
+
+  # ─── 2. CODE QUALITY & SECURITY ─────────────────────────────────────────────
+  code-quality:
+    name: Static Analysis & Security
+    runs-on: ubuntu-latest
+    needs: build-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+          cache: "maven"
+
+      # SAST: scans Java source for OWASP Top 10, injection, XXE, etc.
+      - name: Semgrep SAST scan
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: p/java
+
+      # SCA: cross-references all Maven dependencies against NVD CVE database.
+      # Fails build on HIGH or CRITICAL CVEs (continue-on-error: false).
+      # Add a dependency-check-suppression.xml to whitelist accepted false-positives.
+      - name: OWASP Dependency Check
+        run: mvn org.owasp:dependency-check-maven:check -B
+        continue-on-error: false
+
+      # Uploads coverage + code smells to SonarCloud quality gate.
+      # Requires SONAR_TOKEN secret in repo settings.
+      # Requires sonar.organization in pom.xml or sonar-project.properties.
+      - name: SonarCloud Scan
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: mvn -B verify sonar:sonar -Dsonar.projectKey=my-springboot-app
+
+  # ─── 3. BUILD & SCAN CONTAINER IMAGE ────────────────────────────────────────
+  build-image:
+    name: Docker Build, Trivy Scan & Push
+    runs-on: ubuntu-latest
+    needs: [build-test, code-quality]
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Reuse the JAR built in build-test (avoids re-compiling)
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-jar
+          path: target/
+
+      # Use the full Git SHA as the immutable image tag
+      - name: Generate image tag
+        id: meta
+        run: echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build using the dedicated backend Dockerfile
+      - name: Build backend image
+        run: |
+          docker build \
+            -f Dockerfile.backend \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }} \
+            ./app/
+
+      # Container image vulnerability scan — blocks push on CRITICAL/HIGH unfixed CVEs
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}"
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - name: Push image to GHCR
+        run: |
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}
+
+  # ─── 4. DEPLOY: DEV (auto) ──────────────────────────────────────────────────
+  deploy-dev:
+    name: Deploy to Dev
+    runs-on: ubuntu-latest
+    needs: build-image
+    environment:
+      name: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy backend to Dev (Helm)
+        run: |
+          helm upgrade --install backend ./helm/backend \
+            --namespace dev --create-namespace \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
+            --set image.tag=${{ needs.build-image.outputs.image_tag }} \
+            --set replicaCount=1
+
+      - name: Wait for rollout
+        run: kubectl rollout status deployment/backend -n dev --timeout=120s
+
+      # Spring Actuator health endpoint confirms the app started correctly
+      - name: Smoke test
+        run: |
+          sleep 10
+          curl -f https://dev.myapp.example.com/actuator/health || exit 1
+
+  # ─── 5. INTEGRATION TESTS ───────────────────────────────────────────────────
+  integration-tests:
+    name: API Integration Tests (vs Dev)
+    runs-on: ubuntu-latest
+    needs: deploy-dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+          cache: "maven"
+
+      # Runs the Maven `integration-test` profile against the live dev endpoint
+      - name: Run integration test suite
+        run: |
+          mvn -B verify -Pintegration-test \
+            -Dtest.base.url=https://dev.myapp.example.com
+
+  # ─── 6. DEPLOY: STAGING (auto) ──────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: integration-tests
+    environment:
+      name: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy backend to Staging (Helm)
+        run: |
+          helm upgrade --install backend ./helm/backend \
+            --namespace staging --create-namespace \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
+            --set image.tag=${{ needs.build-image.outputs.image_tag }} \
+            --set replicaCount=2
+
+      - name: Wait for rollout
+        run: kubectl rollout status deployment/backend -n staging --timeout=180s
+
+  # ─── 7. DEPLOY: PROD (manual approval gate) ─────────────────────────────────
+  deploy-prod:
+    name: Deploy to Production (Canary)
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    environment:
+      name: production # required reviewers configured in repo Settings > Environments
+      url: https://myapp.example.com/actuator/health
+    steps:
+      - uses: actions/checkout@v4
+
+      # Canary deployment: initially routes 10% of traffic to new version
+      - name: Deploy backend to Prod — canary 10%
+        run: |
+          helm upgrade --install backend ./helm/backend \
+            --namespace production \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
+            --set image.tag=${{ needs.build-image.outputs.image_tag }} \
+            --set replicaCount=3 \
+            --set canary.enabled=true \
+            --set canary.weight=10
+
+      # Queries Prometheus API for error rate + p99 latency over 5 minutes
+      - name: Monitor canary health (5 min)
+        run: ./scripts/check-canary-metrics.sh
+
+      # Promote to 100% if canary health check passes
+      - name: Promote canary to 100%
+        run: |
+          helm upgrade backend ./helm/backend \
+            --namespace production \
+            --set canary.enabled=false
+
+      - name: Post-deploy smoke test
+        run: curl -f https://myapp.example.com/actuator/health || exit 1
+
+  # ─── 8. ROLLBACK (auto-triggered on prod deploy failure) ────────────────────
+  rollback-prod:
+    name: Rollback Production
+    runs-on: ubuntu-latest
+    if: failure() && needs.deploy-prod.result == 'failure'
+    needs: deploy-prod
+    environment:
+      name: production
+    steps:
+      - name: Rollback backend via Helm
+        run: helm rollback backend -n production

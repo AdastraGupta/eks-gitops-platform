@@ -248,3 +248,24 @@ output "route53_nameservers" {
   value       = var.ssl_enabled ? aws_route53_zone.main[0].name_servers : []
 }
 
+# ─── CloudFront CDN ────────────────────────────────────────────────────────────
+
+output "cloudfront_domain_name" {
+  description = "CloudFront distribution domain name (e.g. d1234abcd.cloudfront.net). Use this to verify CDN is working before DNS cutover."
+  value       = var.cdn_enabled ? aws_cloudfront_distribution.frontend[0].domain_name : "CDN is disabled (cdn_enabled = false)"
+}
+
+output "cloudfront_distribution_id" {
+  description = "CloudFront distribution ID. Use this to create cache invalidations on deploy: aws cloudfront create-invalidation --distribution-id <ID> --paths '/*'"
+  value       = var.cdn_enabled ? aws_cloudfront_distribution.frontend[0].id : "CDN is disabled (cdn_enabled = false)"
+}
+
+output "cloudfront_invalidation_command" {
+  description = "Run this after each frontend deployment to purge stale cached assets from all CloudFront edge PoPs."
+  value       = var.cdn_enabled ? "aws cloudfront create-invalidation --distribution-id ${aws_cloudfront_distribution.frontend[0].id} --paths '/index.html'" : "CDN is disabled (cdn_enabled = false)"
+}
+
+output "cdn_frontend_url" {
+  description = "Public HTTPS URL served via CloudFront CDN (same as app_https_url after DNS cutover)."
+  value       = (var.cdn_enabled && var.ssl_enabled) ? "https://${var.app_subdomain}.${var.domain_name}" : (var.cdn_enabled ? "https://${aws_cloudfront_distribution.frontend[0].domain_name}" : "CDN is disabled (cdn_enabled = false)")
+}

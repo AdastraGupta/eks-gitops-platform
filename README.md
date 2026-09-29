@@ -400,6 +400,8 @@ graph LR
    - **Cross-Namespace ExternalName Services**: Ingress rules in `ingress-nginx` route through dedicated `ExternalName` proxy services (`grafana-external`, `kibana-external`, `argocd-external`, `jaeger-external`) that resolve target service FQDNs across namespaces (`monitoring`, `logging`, `argocd`, `tracing`).
 2. **Automated HTTPS via ACM + Route 53 (`ssl.tf`):**
    - Terraform automatically provisions a **Route 53 Hosted Zone**, requests a free **AWS Certificate Manager (ACM)** TLS certificate, inserts DNS CNAME validation records, and creates a Route 53 **ALIAS A-Record** pointing `tasks.yourdomain.com → Public NLB`. TLS is terminated at the NLB layer for zero pod overhead. Controlled by `ssl_enabled` variable.
+2a. **Global CDN with AWS CloudFront (`cdn.tf`):**
+   - When `cdn_enabled = true`, a **CloudFront distribution** is placed in front of the Public NLB, serving React static assets (`/static/*`) from **400+ AWS edge PoPs worldwide** with a 1-year immutable TTL. `index.html` and `/api/*` paths use `0s` TTL to ensure fresh content on every deploy. The **Route 53 ALIAS** is updated to point to CloudFront instead of the NLB directly. A **SPA 404/403 fallback** returns `index.html` so React Router handles client-side navigation. Cache invalidation for `index.html` is run automatically after each frontend deployment.
 3. **EKS Core Add-ons & Dynamic `gp3` Storage Layer:**
    - **AWS-Managed Add-ons**: `vpc-cni` (direct VPC IP allocation per pod), `coredns` (cluster DNS discovery), `kube-proxy` (node networking), and `aws-ebs-csi-driver` (dynamic storage provisioner).
    - **StorageClass (`gp3`)**: Configured with `volume_binding_mode = "WaitForFirstConsumer"` to ensure EBS volumes are created in the exact Availability Zone of the scheduled pod, with `allow_volume_expansion = true` and `reclaim_policy = "Retain"`. Powers persistent storage for **Elasticsearch (`10Gi`)**, **Prometheus TSDB (`10Gi`)**, and **Alertmanager (`5Gi`)**.
@@ -448,6 +450,7 @@ graph LR
 | **Helm Chart** | `charts/taskmanager` (v1.0.0) — multi-environment values: `values-dev.yaml`, `values-staging.yaml`, `values-prod.yaml` |
 | **Ingress** | Dual Nginx Ingress Controllers — `nginx-public` (internet, v4.10.1) + `nginx-internal` (VPC-only, v4.10.1) |
 | **SSL / TLS** | AWS Certificate Manager (ACM) + Route 53 — automated DNS validation, ALIAS A-record, NLB TLS termination (controlled by `ssl_enabled`) |
+| **CDN / Edge Cache** | AWS CloudFront — global static asset caching (1-year TTL for hashed JS/CSS/images), SPA 404→`index.html` fallback, `0s` TTL for `index.html` + `/api/*` (controlled by `cdn_enabled`) |
 | **Event-Driven Pod Autoscaling** | KEDA v2.15 — Prometheus request-rate + CPU triggers on backend (`ScaledObject`, min:2 → max:15) |
 | **Resource-Based Pod Autoscaling** | Kubernetes HPA v2 — CPU/Memory triggers on frontend (min:3 → max:10) via Metrics Server |
 | **Node Autoscaling** | Karpenter v1.0.8 — just-in-time EC2 Spot/On-Demand provisioning (< 45s), AL2023 AMI, Spot interruption via SQS + EventBridge, node consolidation |
@@ -491,13 +494,15 @@ graph LR
 │       └── templates/                # Helm templates (deployment, service, ingress, HPA, KEDA, PDB, etc.)
 │
 ├── terraform/                        # Infrastructure as Code
-│   ├── provider.tf                   # AWS + Kubernetes + Helm + Random provider config (requires >= 1.6.0)
+│   ├── versions.tf                   # Terraform version (>= 1.6.0), required providers & S3 backend config
+│   ├── provider.tf                   # AWS + Kubernetes + Helm provider configurations
 │   ├── variables.tf                  # All configurable inputs (EFK, Monitoring, ArgoCD, Tracing, SSL, Karpenter, KEDA vars)
 │   ├── vpc.tf                        # VPC, public/private subnets, NAT Gateway
 │   ├── eks.tf                        # EKS cluster + system_nodes (ON_DEMAND) + EBS CSI IRSA
 │   ├── rds.tf                        # RDS PostgreSQL instance + subnet/security groups
 │   ├── secret.tf                     # Kubernetes Secret (app-secret) created by Terraform — DB credentials injected into pods
 │   ├── ssl.tf                        # HTTPS automation: Route 53 Hosted Zone + ACM certificate + DNS validation + NLB ALIAS record
+│   ├── cdn.tf                        # AWS CloudFront CDN — static asset caching (1yr TTL), SPA 404 fallback, no-cache for index.html + /api/*
 │   ├── cloudwatch.tf                 # CloudWatch Log Groups, Dashboard, Metric Alarms
 │   ├── ingress.tf                    # Dual Nginx Ingress Controllers (nginx-public v4.10.1 + nginx-internal v4.10.1)
 │   ├── efk.tf                        # EFK logging stack (Helm: ES + Fluent Bit + Kibana)
@@ -507,7 +512,7 @@ graph LR
 │   ├── k8sgpt.tf                     # K8sGPT Operator (AI-powered SRE via AWS Bedrock + IRSA)
 │   ├── karpenter.tf                  # Karpenter: IRSA + Node IAM Role + SQS queue + EventBridge + Helm
 │   ├── keda.tf                       # KEDA Controller + Kubernetes Metrics Server (Helm)
-│   └── outputs.tf                    # Key outputs (endpoints, commands, passwords)
+│   └── outputs.tf                    # Key outputs (endpoints, commands, passwords, CloudFront distribution ID)
 │
 └── .github/
     └── workflows/
@@ -671,6 +676,7 @@ kubectl port-forward svc/backend-svc 3000:3000 -n taskmanager
 | **Native K8s Ingress (no Istio)** | Eliminates sidecar overhead (~100–150 MB RAM/CPU per pod), removes webhook deadlock risk |
 | **ExternalName proxy pattern** | `ingress-internal.yaml` uses `ExternalName` services in the `ingress-nginx` namespace to reach ClusterIP services across namespaces without exposing them |
 | **ACM + Route 53 for TLS** | Free managed TLS certificate with automated DNS validation. TLS terminated at the NLB layer — zero certificate rotation overhead on pods. Controlled by `ssl_enabled` variable for cost-free dev environments |
+| **CloudFront CDN for React frontend** | Static assets (JS/CSS/images) cached at AWS edge PoPs with 1-year TTL — reduces pod load and global latency from ~100ms to ~5ms. `index.html` always bypasses cache (`0s TTL`) so deployments take effect instantly. SPA 404 fallback handles React Router client-side routing. Controlled by `cdn_enabled` |
 | **Terraform-managed Kubernetes Secret** | DB credentials injected via `terraform/secret.tf` using the `kubernetes_secret` resource — no manual `base64` encoding, no plaintext secrets in git |
 | **ArgoCD via Helm (not raw YAML)** | Zero manual `kubectl apply` steps — MS Teams notifications, app provisioning and namespace creation all automated via `terraform apply` |
 | **`sslmode=require` in DB URI** | AWS RDS enforces TLS by default; this ensures encrypted connections from PostgREST |
@@ -688,7 +694,7 @@ When `ssl_enabled = true` (default), Terraform (`terraform/ssl.tf`) automates th
 2. **ACM Certificate** — issued for `var.app_subdomain.var.domain_name` (e.g., `tasks.yourdomain.com`) with DNS validation
 3. **DNS CNAME Validation Records** — automatically inserted into Route 53 so ACM can validate and issue the certificate without manual steps
 4. **Certificate Validation Waiter** — Terraform blocks further resource creation until ACM marks the certificate as `ISSUED`
-5. **Route 53 ALIAS A-Record** — points `tasks.yourdomain.com` → Public NLB hostname (free, auto-updates when NLB DNS changes)
+5. **Route 53 ALIAS A-Record** — points `tasks.yourdomain.com` → Public NLB hostname (free, auto-updates when NLB DNS changes). **When `cdn_enabled = true`, this alias points to CloudFront instead.**
 6. **NLB TLS Termination** — the Public NLB is annotated with the ACM certificate ARN; TLS 1.3 policy (`ELBSecurityPolicy-TLS13-1-2-2021-06`) is enforced
 
 ### Required Variables for SSL
@@ -708,6 +714,83 @@ terraform apply -var="ssl_enabled=false"
 
 > [!IMPORTANT]
 > Before running `terraform apply` with `ssl_enabled=true`, point your domain's NS records to the Route 53 Hosted Zone nameservers. ACM DNS validation will fail if Route 53 cannot resolve the CNAME records publicly.
+
+## CloudFront CDN
+
+When `cdn_enabled = true` (default), Terraform ([`terraform/cdn.tf`](terraform/cdn.tf)) provisions a **CloudFront distribution** in front of the Public NLB to globally cache React static assets and reduce EKS pod load.
+
+### Cache Strategy
+
+```
+Browser → CloudFront Edge (400+ PoPs worldwide)
+              │
+  /static/*   ├── CACHE HIT  → served in ~5ms  (1-year TTL, immutable hash filenames)
+  (JS/CSS)    └── CACHE MISS → Public NLB → nginx pod → cached at edge
+              │
+  /index.html ├── ALWAYS MISS → Public NLB → nginx pod  (0s TTL, re-fetched every visit)
+              │
+  /api/*      └── NEVER CACHED → Public NLB → PostgREST pod  (live data)
+```
+
+| Path | TTL | Reason |
+|---|---|---|
+| `/static/*` (hashed JS/CSS/images) | **1 year** | CRA/Vite content-hashes filenames — safe to cache forever |
+| `/index.html` | **0s** | References latest hashed asset filenames — must be fresh on every deploy |
+| `/api/*` | **0s** | Live API data — never cache |
+| All other paths | **0s** | Revalidate at origin |
+
+### SPA React Router Fallback
+
+CloudFront is configured with a **custom error response**: `404 → 200 /index.html`. This means a hard refresh on `https://tasks.yourdomain.com/tasks/42` returns `index.html` (not a 404), letting React Router render the correct page client-side.
+
+### Enable / Disable CDN
+
+```bash
+# Enable CDN (default — requires ssl_enabled = true for custom domain)
+terraform apply -var="cdn_enabled=true" -var="ssl_enabled=true"
+
+# Disable CDN (traffic goes directly to Public NLB)
+terraform apply -var="cdn_enabled=false"
+```
+
+### Verify CDN After Deployment
+
+```bash
+# Get CloudFront domain name (test before DNS cutover)
+terraform output cloudfront_domain_name
+# e.g. d1234abcd.cloudfront.net
+
+# Test static asset caching — look for X-Cache: Hit from cloudfront
+curl -I https://d1234abcd.cloudfront.net/static/js/main.abc123.js
+# X-Cache: Miss from cloudfront  (first request)
+curl -I https://d1234abcd.cloudfront.net/static/js/main.abc123.js
+# X-Cache: Hit from cloudfront   (subsequent requests)
+
+# Get distribution ID
+terraform output cloudfront_distribution_id
+```
+
+### Cache Invalidation on Deploy
+
+After each frontend deployment, invalidate `index.html` so browsers pick up the new asset filenames. Add this step to `frontend-cicd.yml` after the Helm rollout:
+
+```bash
+aws cloudfront create-invalidation \
+  --distribution-id $(terraform output -raw cloudfront_distribution_id) \
+  --paths "/index.html"
+```
+
+Or use the pre-built output command:
+
+```bash
+terraform output cloudfront_invalidation_command
+```
+
+> [!IMPORTANT]
+> CloudFront **requires ACM certificates to be in `us-east-1`** regardless of your EKS cluster region. If your cluster is in another region, create a separate `aws` provider alias for `us-east-1` and reference it in `cdn.tf`.
+
+> [!NOTE]
+> The `CLOUDFRONT_DISTRIBUTION_ID` must be added as a GitHub Actions secret (`Settings → Secrets → Actions`) after the first `terraform apply` creates the distribution. Run `terraform output cloudfront_distribution_id` to get the value.
 
 ## Multi-Environment Application Deployment
 
@@ -1198,6 +1281,8 @@ Create a trust policy granting access to `repo:AdastraGE/eks-gitops-platform:*` 
 | `AWS_ROLE_ARN_BUILD` | `arn:aws:iam::123456789012:role/github-actions-ecr-push` | IAM Role ARN for ECR image push OIDC |
 | `ECR_REGISTRY` | `123456789012.dkr.ecr.us-east-1.amazonaws.com` | ECR registry URL for image builds |
 | `TF_VAR_db_password` | Your RDS master password | Injected securely for RDS / PostgREST |
+| `CLOUDFRONT_DISTRIBUTION_ID` | *(After first apply)* `terraform output -raw cloudfront_distribution_id` | Used by `frontend-cicd.yml` to run `aws cloudfront create-invalidation` after each frontend deploy |
+| `SONAR_TOKEN` | SonarCloud project token | Used by `backend-cicd.yml` and `frontend-cicd.yml` for SonarCloud quality gate |
 | `TEAMS_WEBHOOK_URL` | *(Optional)* `https://outlook.office.com/webhook/...` | MS Teams Incoming Webhook for CI/CD & deployment alerts |
 
 **Variables** (Settings → Variables → Actions):

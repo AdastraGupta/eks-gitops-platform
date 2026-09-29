@@ -1,0 +1,332 @@
+# ─── React Frontend CI/CD Pipeline ────────────────────────────────────────────
+#
+# Pipeline flow:
+#
+#  Trigger(push/PR)
+#    └── build-test        (Node 18, npm ci, Jest tests + coverage + build)
+#          └── code-quality (Semgrep SAST + npm audit OWASP + SonarCloud)
+#                └── build-image (Docker build + Trivy scan + push GHCR)
+#                      └── deploy-dev (Helm, 1 replica, auto)
+#                            └── e2e-tests (Playwright vs dev endpoint)
+#                                  └── deploy-staging (Helm, 2 replicas, auto)
+#                                        └── [manual approval gate]
+#                                              └── deploy-prod (canary 10% -> 100%)
+#                                                    └── rollback-prod (on failure)
+#
+# Triggers:
+#   push to main/develop  → full pipeline
+#   pull_request to main  → build-test + code-quality + build-image only
+#
+# Path filter: only runs when frontend source files change.
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: Frontend CI/CD (React)
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'frontend/**'           # All frontend source files
+      - 'package*.json'
+      - 'Dockerfile.frontend'
+      - 'nginx.conf'
+      - '.github/workflows/frontend-cicd.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - 'package*.json'
+      - 'Dockerfile.frontend'
+      - 'nginx.conf'
+
+env:
+  # Image pushed to GitHub Container Registry as ghcr.io/<org>/<repo>-frontend:<sha>
+  IMAGE_NAME: ${{ github.repository }}-frontend
+  REGISTRY: ghcr.io
+
+jobs:
+  # ─── 1. BUILD & TEST ────────────────────────────────────────────────────────
+  build-test:
+    name: Build & Unit Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"          # caches node_modules between runs for faster installs
+
+      # `npm ci` is reproducible: uses exact versions from package-lock.json.
+      # Fails if package-lock.json is out of sync — catches accidental dep drift.
+      - name: Install dependencies
+        run: npm ci
+
+      # Runs Jest in non-interactive CI mode and collects coverage for SonarCloud
+      - name: Run unit tests with coverage
+        run: npm test -- --watchAll=false --coverage --coverageReporters=lcov
+
+      # Publishes test results as a GitHub check with per-test pass/fail view
+      - name: Publish test report
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: Jest Tests
+          path: 'coverage/jest-results.json'
+          reporter: jest-json
+
+      # Upload coverage for use by SonarCloud in code-quality job
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-coverage
+          path: coverage/lcov.info
+          retention-days: 1
+
+      # `npm run build` compiles React source → optimised static assets in build/
+      - name: Build React app
+        run: npm run build
+
+      # Pass the compiled build/ directory to build-image job
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: build/
+          retention-days: 1
+
+  # ─── 2. CODE QUALITY & SECURITY ─────────────────────────────────────────────
+  code-quality:
+    name: Static Analysis & Security
+    runs-on: ubuntu-latest
+    needs: build-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Download coverage generated in build-test for SonarCloud upload
+      - name: Download coverage artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-coverage
+          path: coverage/
+
+      # SAST: scans TypeScript/JavaScript for OWASP Top 10, XSS, prototype pollution, etc.
+      - name: Semgrep SAST scan
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: p/typescript    # covers React + TypeScript patterns
+
+      # SCA: npm-native dependency vulnerability scan against GitHub Advisory Database.
+      # --audit-level=high fails build on HIGH or CRITICAL vulnerabilities.
+      # Use `npm audit fix` locally to resolve, or `npm audit --force` to override.
+      - name: OWASP npm audit
+        run: npm audit --audit-level=high
+        continue-on-error: false
+
+      # Uploads coverage + code smells to SonarCloud quality gate.
+      # Uses lcov.info from Jest coverage for line/branch coverage metrics.
+      # Requires SONAR_TOKEN secret in repo settings.
+      - name: SonarCloud Scan
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN:  ${{ secrets.SONAR_TOKEN }}
+        run: |
+          npx sonar-scanner \
+            -Dsonar.projectKey=my-react-frontend \
+            -Dsonar.organization=${{ github.repository_owner }} \
+            -Dsonar.sources=src \
+            -Dsonar.host.url=https://sonarcloud.io \
+            -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info \
+            -Dsonar.exclusions=**/*.test.tsx,**/*.test.ts,**/node_modules/**
+
+  # ─── 3. BUILD & SCAN CONTAINER IMAGE ────────────────────────────────────────
+  build-image:
+    name: Docker Build, Trivy Scan & Push
+    runs-on: ubuntu-latest
+    needs: [build-test, code-quality]
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Download the pre-compiled React build/ directory (avoids re-running npm run build)
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-build
+          path: build/
+
+      # Use the full Git SHA as the immutable image tag
+      - name: Generate image tag
+        id: meta
+        run: echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build using the dedicated frontend Dockerfile (nginx Alpine serving build/)
+      - name: Build frontend image
+        run: |
+          docker build \
+            -f Dockerfile.frontend \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }} \
+            .
+
+      # Container image vulnerability scan — blocks push on CRITICAL/HIGH unfixed CVEs
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref:      "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}"
+          severity:       "CRITICAL,HIGH"
+          exit-code:      "1"
+          ignore-unfixed: true
+
+      - name: Push image to GHCR
+        run: |
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}
+
+  # ─── 4. DEPLOY: DEV (auto) ──────────────────────────────────────────────────
+  deploy-dev:
+    name: Deploy to Dev
+    runs-on: ubuntu-latest
+    needs: build-image
+    environment:
+      name: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy frontend to Dev (Helm)
+        run: |
+          helm upgrade --install frontend ./helm/frontend \
+            --namespace dev --create-namespace \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
+            --set image.tag=${{ needs.build-image.outputs.image_tag }} \
+            --set replicaCount=1
+
+      - name: Wait for rollout
+        run: kubectl rollout status deployment/frontend -n dev --timeout=120s
+
+      # HTTP 200 from nginx confirms the React app is being served correctly
+      - name: Smoke test
+        run: |
+          sleep 10
+          curl -f https://dev.myapp.example.com/ || exit 1
+
+  # ─── 5. END-TO-END TESTS ────────────────────────────────────────────────────
+  e2e-tests:
+    name: E2E Tests — Playwright (vs Dev)
+    runs-on: ubuntu-latest
+    needs: deploy-dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+
+      - name: Install Playwright and dependencies
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      # Runs Playwright E2E tests against the live dev environment.
+      # Tests cover user flows: login, create task, delete task, etc.
+      - name: Run Playwright E2E tests
+        run: npx playwright test --project=chromium
+        env:
+          BASE_URL: https://dev.myapp.example.com
+          API_URL:  https://dev.myapp.example.com/api
+
+      # Upload Playwright HTML report as a workflow artifact for debugging failures
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+
+  # ─── 6. DEPLOY: STAGING (auto) ──────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: e2e-tests
+    environment:
+      name: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy frontend to Staging (Helm)
+        run: |
+          helm upgrade --install frontend ./helm/frontend \
+            --namespace staging --create-namespace \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
+            --set image.tag=${{ needs.build-image.outputs.image_tag }} \
+            --set replicaCount=2
+
+      - name: Wait for rollout
+        run: kubectl rollout status deployment/frontend -n staging --timeout=180s
+
+  # ─── 7. DEPLOY: PROD (manual approval gate) ─────────────────────────────────
+  deploy-prod:
+    name: Deploy to Production (Canary)
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    environment:
+      name: production          # required reviewers configured in repo Settings > Environments
+      url: https://myapp.example.com
+    steps:
+      - uses: actions/checkout@v4
+
+      # Canary deployment: initially routes 10% of traffic to new version
+      - name: Deploy frontend to Prod — canary 10%
+        run: |
+          helm upgrade --install frontend ./helm/frontend \
+            --namespace production \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
+            --set image.tag=${{ needs.build-image.outputs.image_tag }} \
+            --set replicaCount=3 \
+            --set canary.enabled=true \
+            --set canary.weight=10
+
+      # Queries Prometheus/Grafana API for frontend error rate + core web vitals
+      - name: Monitor canary health (5 min)
+        run: ./scripts/check-canary-metrics.sh
+
+      # Promote to 100% if canary metrics are healthy
+      - name: Promote canary to 100%
+        run: |
+          helm upgrade frontend ./helm/frontend \
+            --namespace production \
+            --set canary.enabled=false
+
+      - name: Post-deploy smoke test
+        run: curl -f https://myapp.example.com/ || exit 1
+
+  # ─── 8. ROLLBACK (auto-triggered on prod deploy failure) ────────────────────
+  rollback-prod:
+    name: Rollback Production
+    runs-on: ubuntu-latest
+    if: failure() && needs.deploy-prod.result == 'failure'
+    needs: deploy-prod
+    environment:
+      name: production
+    steps:
+      - name: Rollback frontend via Helm
+        run: helm rollback frontend -n production

@@ -18,7 +18,7 @@ name: "Dev Environment — Infrastructure & GitOps Pipeline"
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main]
     paths:
       - "terraform/**"
       - "k8s/**"
@@ -41,9 +41,9 @@ on:
         default: true
 
 permissions:
-  id-token: write       # Required for AWS OIDC authentication (STS)
-  contents: write       # Required to commit updated RDS endpoint back to git if changed
-  pull-requests: write  # Required for PR comments
+  id-token: write # Required for AWS OIDC authentication (STS)
+  contents: write # Required to commit updated RDS endpoint back to git if changed
+  pull-requests: write # Required for PR comments
   issues: write
 
 env:
@@ -361,7 +361,15 @@ jobs:
   summary:
     name: "📊 Dev Deployment Summary"
     runs-on: ubuntu-latest
-    needs: [validate, terraform-plan-dev, approval-dev, terraform-apply-dev, gitops-sync-dev, smoke-test]
+    needs:
+      [
+        validate,
+        terraform-plan-dev,
+        approval-dev,
+        terraform-apply-dev,
+        gitops-sync-dev,
+        smoke-test,
+      ]
     if: always()
     steps:
       - name: Generate GitHub Step Summary

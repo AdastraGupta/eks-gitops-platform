@@ -73,14 +73,14 @@ resource "aws_acm_certificate_validation" "app" {
 # Routes https://tasks.domain.com directly to the AWS Network Load Balancer.
 # AWS Route 53 ALIAS records are free of query charges and update automatically.
 data "aws_lb" "public_nlb" {
-  count = var.ssl_enabled ? 1 : 0
+  count = (var.ssl_enabled || var.cdn_enabled) ? 1 : 0
   name  = "${var.cluster_name}-public-nlb"
 
   depends_on = [helm_release.ingress_nginx_public]
 }
 
 resource "aws_route53_record" "app_alias" {
-  count   = var.ssl_enabled ? 1 : 0
+  count   = (var.ssl_enabled && !var.cdn_enabled) ? 1 : 0
   zone_id = aws_route53_zone.main[0].zone_id
   name    = "${var.app_subdomain}.${var.domain_name}"
   type    = "A"
@@ -91,3 +91,4 @@ resource "aws_route53_record" "app_alias" {
     evaluate_target_health = true
   }
 }
+

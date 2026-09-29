@@ -9,7 +9,7 @@ variable "aws_region" {
 variable "cluster_name" {
   description = "Name for the EKS cluster and associated AWS resources."
   type        = string
-  default     = "taskmanager-cluster"
+  default     = "eks-cluster"
 }
 
 variable "environment" {
@@ -262,6 +262,12 @@ variable "app_subdomain" {
 
 variable "ssl_enabled" {
   description = "Enable HTTPS via ACM certificate + Route 53 DNS alias record on the public NLB."
+  type        = bool
+  default     = true
+}
+
+variable "cdn_enabled" {
+  description = "Enable AWS CloudFront CDN in front of the public NLB for React frontend caching. Requires ssl_enabled = true for custom domain support."
   type        = bool
   default     = true
 }

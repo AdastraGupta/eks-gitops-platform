@@ -1,0 +1,51 @@
+# ─── Spring Boot Backend — Runtime-only Dockerfile ────────────────────────────
+#
+# ⚠️  NO BUILD STAGE — JAR is pre-built by the CI pipeline.
+#
+# Why no multi-stage build here?
+#   The `build-test` job in backend-cicd.yml already:
+#     1. Compiles the JAR with `mvn package`
+#     2. Runs all unit tests against it
+#     3. Passes it through OWASP + SonarCloud quality gates
+#     4. Uploads it as the `backend-jar` artifact
+#
+#   The `build-image` job downloads that artifact into target/ before
+#   running `docker build`, so the JAR is already present on the runner.
+#
+#   Building inside Docker would mean:
+#     - Running Maven a SECOND time (wasted ~3 min per run)
+#     - Losing the Maven ~/.m2 cache (cold download of all deps inside Docker)
+#     - Unit test results invisible to GitHub (run inside container)
+#     - The image under test is NOT the same artifact that was quality-gated
+#
+# Security:
+#   - Non-root system user `spring` (no login shell, no home dir)
+#   - JRE-only runtime (~90MB) — no compiler, no Maven, no source code
+#   - HEALTHCHECK uses Spring Actuator /actuator/health endpoint
+# ──────────────────────────────────────────────────────────────────────────────
+
+FROM eclipse-temurin:17-jre-alpine
+
+WORKDIR /app
+
+# Create a dedicated non-root system user and group.
+# -S = system account (no password, no home dir, no interactive shell)
+RUN addgroup -S spring && adduser -S spring -G spring
+USER spring:spring
+
+# The JAR is placed in target/ by the CI `download-artifact` step
+# (actions/download-artifact in the build-image job of backend-cicd.yml)
+# before `docker build` is executed on the runner.
+COPY target/*.jar app.jar
+
+EXPOSE 8080
+
+# Liveness check — fails fast (3s) to trigger K8s pod restart on hang.
+# --start-period=60s gives Spring Boot time to initialise before health checks start.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=60s --retries=3 \
+  CMD wget -qO- http://localhost:8080/actuator/health || exit 1
+
+# Exec form ensures JVM is PID 1 and receives SIGTERM directly from K8s
+# -> enables graceful shutdown (drains in-flight requests before exit)
+ENTRYPOINT ["java"]
+CMD ["-jar", "/app/app.jar"]

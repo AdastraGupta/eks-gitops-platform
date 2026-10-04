@@ -90,3 +90,4 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+      - ServerSideApply=true    # Required for ingress-nginx ClusterRole and webhook objects

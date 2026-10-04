@@ -13,15 +13,13 @@ RUN addgroup -S spring && adduser -S spring -G spring
 USER spring:spring
 COPY --from=build /app/target/*.jar app.jar
 EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=3s CMD wget -qO- http://localhost:8080/actuator/health || exit 1
 ENTRYPOINT ["java"]
-CMD ["-jar", "/app/app.jar"]
+CMD ["-jar", "app.jar"]
 
 
 
 
-
-FROM node:18 AS build
+FROM node:18 AS builder
 WORKDIR /app
 COPY package*.json .
 RUN npm install
@@ -33,9 +31,9 @@ WORKDIR /app
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 USER appuser:appuser
 
-COPY --from=build /app/dist          ./dist
-COPY --from=build /app/node_modules  ./node_modules
-COPY --from=build /app/package*.json .
+COPY --from=builder /app/dist          ./dist
+COPY --from=builder /app/node_modules  ./node_modules
+COPY --from=builder /app/package*.json .
 
 EXPOSE 8000
 ENTRYPOINT ["node"]

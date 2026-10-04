@@ -217,4 +217,3 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true    # Required for large CRDs in kube-prometheus-stack
-      - Replace=true            # Replace CRDs instead of patching (avoids annotation size limits)

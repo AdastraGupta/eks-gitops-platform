@@ -154,10 +154,16 @@ variable "db_username" {
 }
 
 variable "db_password" {
-  description = "Master password for the RDS PostgreSQL database."
+  description = "Master password for the RDS PostgreSQL database. Must be provided via TF_VAR_db_password environment variable or -var flag. Never commit a value here."
   type        = string
   sensitive   = true
-  default     = "postgres123"
+  # No default — must be injected at runtime via GitHub Actions secret (TF_VAR_db_password)
+  # or AWS SSM Parameter Store. Omitting default forces an explicit secure value on every apply.
+
+  validation {
+    condition     = length(var.db_password) >= 16
+    error_message = "db_password must be at least 16 characters for RDS compliance."
+  }
 }
 
 # ─── Notifications & Webhooks ────────────────────────────────────────────────

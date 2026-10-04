@@ -83,15 +83,19 @@ resource "aws_db_instance" "postgres" {
   publicly_accessible    = false # Only accessible from inside the VPC
 
   # ── Backup & Maintenance ─────────────────────────────────────────────────────
-  backup_retention_period = 1             # AWS Free Tier limit: max 1 day backup retention
-  backup_window           = "03:00-04:00" # UTC — low-traffic window
+  backup_retention_period = var.environment == "prod" ? 7 : 1 # 7 days for prod, 1 day for dev/staging
+  backup_window           = "03:00-04:00"                     # UTC — low-traffic window
   maintenance_window      = "Mon:04:00-Mon:05:00"
-  deletion_protection     = false # Set to true for production to prevent accidental deletion
+
+  # deletion_protection: Prevents terraform destroy from deleting the RDS instance.
+  # Enabled automatically for production — must be manually disabled before `terraform destroy`.
+  deletion_protection = var.environment == "prod"
 
   # ── Lifecycle ────────────────────────────────────────────────────────────────
-  # skip_final_snapshot = true for dev/staging convenience.
-  # For production, set to false and specify final_snapshot_identifier.
-  skip_final_snapshot = true
+  # skip_final_snapshot = false in prod: Creates a final DB snapshot on destruction.
+  # In dev/staging, skipped for convenience (no persistent data worth preserving).
+  skip_final_snapshot       = var.environment != "prod"
+  final_snapshot_identifier = var.environment == "prod" ? "${var.cluster_name}-postgres-final-snapshot" : null
 
   tags = {
     Name        = "${var.cluster_name}-postgres"

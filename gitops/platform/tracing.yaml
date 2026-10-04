@@ -104,3 +104,4 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+      - ServerSideApply=true    # Required for Jaeger CRDs

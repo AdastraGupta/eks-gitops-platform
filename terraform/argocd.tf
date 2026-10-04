@@ -350,6 +350,9 @@ resource "helm_release" "argocd" {
             "PrunePropagationPolicy=foreground",
             "PruneLast=true",
             "ServerSideApply=true",
+            # Prevents pre-flight validation failure when KEDA/Ingress CRDs (ScaledObject,
+            # IngressClass) are still being registered during initial cluster bootstrap.
+            "SkipDryRunOnMissingResource=true",
           ]
           retry = {
             limit = 5
@@ -366,7 +369,5 @@ resource "helm_release" "argocd" {
 
   depends_on = [
     module.eks,
-    # Note: ingress_nginx_internal removed from depends_on — it is now managed
-    # by ArgoCD (gitops/platform/ingress-internal.yaml) not Terraform.
   ]
 }

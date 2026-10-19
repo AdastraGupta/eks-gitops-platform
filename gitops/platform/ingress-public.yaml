@@ -28,9 +28,9 @@ spec:
   project: default
 
   source:
-    repoURL: 'https://kubernetes.github.io/ingress-nginx'
+    repoURL: "https://kubernetes.github.io/ingress-nginx"
     chart: ingress-nginx
-    targetRevision: '4.10.1'
+    targetRevision: "4.10.1"
     helm:
       releaseName: nginx-public
       values: |
@@ -55,7 +55,7 @@ spec:
             annotations:
               service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
               service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
-              service.beta.kubernetes.io/aws-load-balancer-name: "taskmanager-public-nlb"
+              service.beta.kubernetes.io/aws-load-balancer-name: "eks-cluster-public-nlb"
               service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
               # NOTE: Add the ACM cert annotation here if ssl_enabled=true.
               # The ARN is available from: terraform output acm_certificate_arn
@@ -81,7 +81,7 @@ spec:
             use-forwarded-headers: "true"
 
   destination:
-    server: 'https://kubernetes.default.svc'
+    server: "https://kubernetes.default.svc"
     namespace: ingress-nginx
 
   syncPolicy:
@@ -90,4 +90,4 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
-      - ServerSideApply=true    # Required for ingress-nginx ClusterRole and webhook objects
+      - ServerSideApply=true # Required for ingress-nginx ClusterRole and webhook objects

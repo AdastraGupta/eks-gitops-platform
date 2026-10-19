@@ -8,6 +8,12 @@
 # Search for errors case-insensitively and print columns: $1(date), $2(time), $3(level), $NF(last column)
 grep -i "error" /path/to/log/file.log | awk '{print $1, $2, $3, $NF}'
 
+#  -n for 'no new line' & -c for count
+echo -n "ERROR : " && grep -c "ERROR" /path/to/log/file.log
+#  Command substitution ($(...))
+echo "ERROR : $(grep -c "ERROR" /path/to/log/file.log)"
+
+
 # Count and rank top 5 IP addresses hitting a service (e.g. from access logs)
 awk '{print $1}' /var/log/nginx/access.log | sort | uniq -c | sort -nr | head -n 5
 

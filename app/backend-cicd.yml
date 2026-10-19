@@ -114,7 +114,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        run: mvn -B verify sonar:sonar -Dsonar.projectKey=my-springboot-app
+        run: |
+          mvn -B verify sonar:sonar \
+            -Dsonar.projectKey=my-springboot-app \
+            -Dsonar.qualitygate.wait=true
 
   # ─── 3. BUILD & SCAN CONTAINER IMAGE ────────────────────────────────────────
   build-image:

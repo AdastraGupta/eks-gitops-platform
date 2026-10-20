@@ -20,7 +20,7 @@ name: "PR Validation & Terraform Plan"
 
 on:
   pull_request:
-    branches: [main, develop]
+    branches: [main]
     paths:
       - "terraform/**"
       - "k8s/**"

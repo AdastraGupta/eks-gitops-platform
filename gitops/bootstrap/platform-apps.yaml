@@ -1,0 +1,44 @@
+# ─── Root App of Apps — Platform Bootstrap ────────────────────────────────────
+#
+# This is the single ArgoCD Application that Terraform registers at cluster
+# bootstrap time. It points to gitops/platform/, which contains one ArgoCD
+# Application manifest per platform component.
+#
+# Flow:
+#   Terraform → helm_release.argocd → (registers this App) → ArgoCD reads
+#   gitops/platform/*.yaml → deploys Ingress, Monitoring, EFK, Tracing, KEDA
+#
+# To add a new platform tool:
+#   1. Create gitops/platform/<tool>.yaml
+#   2. git push → ArgoCD auto-discovers and installs it. No Terraform required.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-apps
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    app: platform-apps
+    managed-by: terraform-bootstrap
+spec:
+  project: default
+
+  source:
+    repoURL: 'https://github.com/AdastraGE/eks-gitops-platform.git'
+    targetRevision: main
+    # ArgoCD watches this directory — every *.yaml in here becomes an Application
+    path: gitops/platform
+
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: argocd
+
+  syncPolicy:
+    automated:
+      prune: true       # Remove apps deleted from gitops/platform/
+      selfHeal: true    # Revert manual kubectl edits automatically
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

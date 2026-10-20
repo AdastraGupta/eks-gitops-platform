@@ -1,0 +1,132 @@
+# ─── KEDA + Metrics Server ────────────────────────────────────────────────────
+#
+# Deploys two components for event-driven autoscaling:
+#
+#   1. Metrics Server  — Provides real-time CPU/Memory data to Kubernetes HPA.
+#      Required for ALL HPA (Horizontal Pod Autoscaler) to work. Installed into
+#      kube-system (where Kubernetes expects it).
+#
+#   2. KEDA Controller — Event-driven autoscaling beyond CPU/Memory. Watches
+#      ScaledObject custom resources and extends HPA with external triggers:
+#        - Prometheus metrics (HTTP request rate, queue depth)
+#        - SQS queue length
+#        - Any other KEDA scalers
+#
+# Sync Wave ordering:
+#   Wave 1: Metrics Server (needed by Wave 2 KEDA for its own HPA)
+#   Wave 2: KEDA (depends on Metrics Server being available)
+#
+# KEDA Prometheus integration:
+#   KEDA exposes its own metrics (scaling decisions, queue depths) as a
+#   ServiceMonitor on port 8080, scraped by the monitoring namespace Prometheus.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── 1. Metrics Server ─────────────────────────────────────────────────────────
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: metrics-server
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    # Wave 1: Must be ready before KEDA and before any HPA triggers
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: default
+
+  source:
+    repoURL: 'https://kubernetes-sigs.github.io/metrics-server/'
+    chart: metrics-server
+    targetRevision: '3.12.1'
+    helm:
+      releaseName: metrics-server
+      values: |
+        # Pin Metrics Server to system node group
+        nodeSelector:
+          nodegroup: system
+
+        # Required for EKS — resolves kubelet certificate validation issue
+        # when using the private endpoint or self-signed kubelet certs
+        args:
+          - --kubelet-insecure-tls
+
+  destination:
+    server: 'https://kubernetes.default.svc'
+    # Metrics Server must live in kube-system — Kubernetes API server
+    # looks for it there when serving /apis/metrics.k8s.io
+    namespace: kube-system
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+
+---
+
+# ── 2. KEDA Controller ────────────────────────────────────────────────────────
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: keda
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    # Wave 2: After Metrics Server is ready
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: default
+
+  source:
+    repoURL: 'https://kedacore.github.io/charts'
+    chart: keda
+    targetRevision: '2.15.1'
+    helm:
+      releaseName: keda
+      values: |
+        # Pin KEDA controller pods to On-Demand system node group for stability
+        nodeSelector:
+          nodegroup: system
+
+        # High availability — run 2 controller replicas
+        replicaCount: 2
+
+        # Resource limits for the KEDA operator pod
+        resources:
+          operator:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          metricServer:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+
+        # Expose Prometheus metrics from KEDA itself (scaling decisions, queue depths)
+        # Prometheus (deployed in monitoring namespace, wave 2) scrapes these via ServiceMonitor
+        prometheus:
+          operator:
+            enabled: true
+            port: 8080
+            serviceMonitor:
+              enabled: true
+              namespace: monitoring
+
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: keda
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true    # Required for KEDA CRDs

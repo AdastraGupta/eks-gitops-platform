@@ -1,0 +1,50 @@
+# ─── React Frontend — Runtime-only Dockerfile ─────────────────────────────────
+#
+# ⚠️  NO BUILD STAGE — React app is pre-built by the CI pipeline.
+#
+# Why no multi-stage build here?
+#   The `build-test` job in frontend-cicd.yml already:
+#     1. Installs dependencies with `npm ci`
+#     2. Runs Jest unit tests with coverage
+#     3. Passes through Semgrep SAST + npm audit + SonarCloud quality gates
+#     4. Runs `npm run build` → produces optimised static assets in build/
+#     5. Uploads build/ as the `frontend-build` artifact
+#
+#   The `build-image` job downloads that artifact into build/ before
+#   running `docker build`, so the static files are already present on the runner.
+#
+#   Building inside Docker would mean:
+#     - Running `npm ci` + `npm run build` a SECOND time (wasted ~2 min per run)
+#     - No npm cache available inside Docker (cold install of all packages)
+#     - Test results invisible to GitHub (run inside container)
+#     - The image under test is NOT the same artifact that was quality-gated
+#
+# Why nginx instead of node:18-alpine for runtime?
+#   - React apps are static files (HTML/CSS/JS) after `npm run build`
+#   - nginx is purpose-built for static file serving (~7MB vs ~50MB node:alpine)
+#   - nginx handles gzip compression, cache headers, and SPA fallback natively
+#   - No Node.js runtime or npm needed to serve static HTML/CSS/JS
+# ──────────────────────────────────────────────────────────────────────────────
+
+FROM nginx:1.27-alpine
+
+# Remove default nginx config and replace with SPA-aware config.
+# Required for React Router: all unknown paths fall back to index.html
+# so client-side routing works (e.g. /tasks/1 doesn't 404 from nginx).
+RUN rm /etc/nginx/conf.d/default.conf
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+# The build/ directory is placed here by the CI `download-artifact` step
+# (actions/download-artifact in the build-image job of frontend-cicd.yml)
+# before `docker build` is executed on the runner.
+COPY build/ /usr/share/nginx/html
+
+EXPOSE 80
+
+# Liveness check — HTTP 200 from the React app root confirms nginx is serving.
+# --start-period=10s is short since nginx starts near-instantly.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD wget -qO- http://localhost:80/ || exit 1
+
+# nginx starts in foreground mode (required for PID 1 / Docker compatibility)
+CMD ["nginx", "-g", "daemon off;"]

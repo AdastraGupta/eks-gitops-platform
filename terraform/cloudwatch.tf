@@ -3,7 +3,7 @@
 # This file provisions:
 #   1. CloudWatch Log Group     — Receives Prometheus EMF metrics from the
 #                                 CloudWatch Agent DaemonSet (set in eks.tf)
-#   2. CloudWatch Dashboard     — Unified 4-widget view of EKS, RDS, Istio, and
+#   2. CloudWatch Dashboard     — Unified 3-widget view of EKS, RDS, and
 #                                 PostgREST Prometheus metrics in one pane
 #   3. CloudWatch Metric Alarms — RDS high CPU + backend 5xx HTTP error alarms
 #

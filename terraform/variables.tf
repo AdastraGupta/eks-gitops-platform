@@ -9,7 +9,7 @@ variable "aws_region" {
 variable "cluster_name" {
   description = "Name for the EKS cluster and associated AWS resources."
   type        = string
-  default     = "taskmanager-cluster"
+  default     = "eks-cluster"
 }
 
 variable "environment" {
@@ -127,18 +127,6 @@ variable "app_node_desired_size" {
 
 # ─── EFK Logging Stack ─────────────────────────────────────────────────────────
 
-variable "efk_enabled" {
-  description = "Enable the EFK (Elasticsearch, Fluent Bit, Kibana) logging stack."
-  type        = bool
-  default     = true
-}
-
-variable "efk_elasticsearch_volume_size" {
-  description = "Size of the EBS gp3 PersistentVolume for Elasticsearch data (in Gi)."
-  type        = number
-  default     = 10
-}
-
 # ─── RDS PostgreSQL ────────────────────────────────────────────────────────────
 
 variable "rds_instance_class" {
@@ -166,25 +154,19 @@ variable "db_username" {
 }
 
 variable "db_password" {
-  description = "Master password for the RDS PostgreSQL database."
+  description = "Master password for the RDS PostgreSQL database. Must be provided via TF_VAR_db_password environment variable or -var flag. Never commit a value here."
   type        = string
   sensitive   = true
-  default     = "postgres123"
+  # No default — must be injected at runtime via GitHub Actions secret (TF_VAR_db_password)
+  # or AWS SSM Parameter Store. Omitting default forces an explicit secure value on every apply.
+
+  validation {
+    condition     = length(var.db_password) >= 16
+    error_message = "db_password must be at least 16 characters for RDS compliance."
+  }
 }
 
-# ─── Prometheus + Grafana Monitoring Stack ────────────────────────────────────
-
-variable "monitoring_enabled" {
-  description = "Enable the Prometheus + Grafana monitoring stack via Helm (kube-prometheus-stack)."
-  type        = bool
-  default     = true
-}
-
-variable "monitoring_prometheus_volume_size" {
-  description = "Size of the EBS gp3 PersistentVolume for Prometheus metrics storage (in Gi)."
-  type        = number
-  default     = 10
-}
+# ─── Notifications & Webhooks ────────────────────────────────────────────────
 
 variable "teams_webhook_url" {
   description = "Microsoft Teams incoming webhook URL for Alertmanager and CI/CD alerts."
@@ -202,12 +184,6 @@ variable "argocd_enabled" {
 }
 
 # ─── Jaeger Distributed Tracing ───────────────────────────────────────────────
-
-variable "tracing_enabled" {
-  description = "Enable Jaeger distributed tracing stack via Helm (jaegertracing/jaeger chart)."
-  type        = bool
-  default     = true
-}
 
 # ─── K8sGPT — AI-Powered SRE Operator ────────────────────────────────────────
 
@@ -240,12 +216,6 @@ variable "karpenter_enabled" {
 
 # ─── KEDA: Event-Driven Pod Autoscaler ───────────────────────────────────────
 
-variable "keda_enabled" {
-  description = "Enable KEDA event-driven pod autoscaling. Also installs Kubernetes Metrics Server required for HPA CPU/Memory triggers."
-  type        = bool
-  default     = true
-}
-
 # ─── SSL / DNS (ACM + Route 53) ────────────────────────────────────────────────
 
 variable "domain_name" {
@@ -262,6 +232,12 @@ variable "app_subdomain" {
 
 variable "ssl_enabled" {
   description = "Enable HTTPS via ACM certificate + Route 53 DNS alias record on the public NLB."
+  type        = bool
+  default     = true
+}
+
+variable "cdn_enabled" {
+  description = "Enable AWS CloudFront CDN in front of the public NLB for React frontend caching. Requires ssl_enabled = true for custom domain support."
   type        = bool
   default     = true
 }

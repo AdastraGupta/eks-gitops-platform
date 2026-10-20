@@ -1,4 +1,4 @@
-﻿# ─── Karpenter EC2NodeClass & NodePool (Application Workloads) ─────────────────
+# ─── Karpenter EC2NodeClass & NodePool (Application Workloads) ─────────────────
 #
 # EC2NodeClass:  Defines HOW Karpenter launches EC2 instances
 #                (AMI, subnets, security groups, instance profile, tags).
@@ -25,18 +25,22 @@ spec:
   # AL2023 is the modern, optimised Amazon Linux for EKS (replaces AL2).
   amiFamily: AL2023
 
+  # In Karpenter v1, amiSelectorTerms is required
+  amiSelectorTerms:
+    - alias: al2023@latest
+
   # Subnet discovery: Karpenter finds private subnets tagged with this key=value.
   subnetSelectorTerms:
     - tags:
-        karpenter.sh/discovery: taskmanager-cluster
+        karpenter.sh/discovery: eks-cluster
 
   # Security group discovery: attaches the EKS node security group to launched instances.
   securityGroupSelectorTerms:
     - tags:
-        karpenter.sh/discovery: taskmanager-cluster
+        karpenter.sh/discovery: eks-cluster
 
   # IAM instance profile attached to Karpenter-launched EC2 nodes.
-  instanceProfile: taskmanager-cluster-karpenter-node-profile
+  instanceProfile: eks-cluster-karpenter-node-profile
 
   # Root volume: 20 GB gp3 with encryption enabled.
   blockDeviceMappings:
@@ -49,7 +53,7 @@ spec:
 
   # Tags applied to all EC2 instances launched by Karpenter.
   tags:
-    Name: taskmanager-cluster-karpenter-node
+    Name: eks-cluster-karpenter-node
     ManagedBy: Karpenter
     nodegroup: app
     karpenter.sh/nodepool: app-nodepool
@@ -121,9 +125,9 @@ spec:
 
   # ── Disruption & Node Consolidation Policy ────────────────────────────────────
   disruption:
-    # WhenUnderutilized: Karpenter automatically merges and terminates nodes
+    # WhenEmptyOrUnderutilized: Karpenter automatically merges and terminates nodes
     # that are running below capacity. Reduces wasted EC2 costs during off-peak.
-    consolidationPolicy: WhenUnderutilized
+    consolidationPolicy: WhenEmptyOrUnderutilized
 
     # Minimum 30 seconds before Karpenter attempts to consolidate an underused node.
     consolidateAfter: 30s

@@ -1,0 +1,107 @@
+# ─── Jaeger Distributed Tracing Stack ────────────────────────────────────────
+#
+# Deploys Jaeger for end-to-end distributed tracing across microservices.
+# Uses the official jaegertracing/jaeger Helm chart.
+#
+# Architecture:
+#   - Storage: Traces stored in the existing Elasticsearch cluster
+#     (elasticsearch-master.logging.svc.cluster.local:9200 — deployed by efk.yaml)
+#   - Ingress: Query UI served via internal Nginx at /jaeger
+#     (http://<INTERNAL-NLB-IP>/jaeger — requires VPN or kubectl port-forward)
+#   - OpenTelemetry (OTLP): Collector exposes gRPC (4317) and HTTP (4318)
+#     endpoints for application tracing instrumentation.
+#
+# Application instrumentation:
+#   Configure your apps with OTEL_EXPORTER_OTLP_ENDPOINT:
+#     http://jaeger-collector.tracing.svc.cluster.local:4318
+#
+# Grafana integration:
+#   Jaeger is pre-configured as a data source in Grafana (see monitoring.yaml)
+#   allowing trace correlation from Grafana dashboards.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: jaeger
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    # Wave 3: Elasticsearch (wave 2) must be ready — Jaeger uses it as storage
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  project: default
+
+  source:
+    repoURL: 'https://jaegertracing.github.io/helm-charts'
+    chart: jaeger
+    targetRevision: '3.0.12'
+    helm:
+      releaseName: jaeger
+      values: |
+        # ── Jaeger Query (UI) ──────────────────────────────────────────────────
+        query:
+          service:
+            type: ClusterIP
+            port: 16686
+
+          # Serve behind /jaeger subpath for internal Ingress routing
+          extraArgs:
+            - "--query.base-path=/jaeger"
+
+          # Pin to system_nodes
+          nodeSelector:
+            nodegroup: system
+
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+
+        # ── Jaeger Collector (Span Ingestion) ──────────────────────────────────
+        collector:
+          service:
+            otlp:
+              grpc:
+                port: 4317
+              http:
+                port: 4318
+
+          # Pin to system_nodes
+          nodeSelector:
+            nodegroup: system
+
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "300m"
+              memory: "512Mi"
+
+        # ── Jaeger Agent ───────────────────────────────────────────────────────
+        agent:
+          enabled: true
+
+        # ── Storage Configuration ──────────────────────────────────────────────
+        # Uses existing Elasticsearch cluster deployed by efk.yaml (wave 2)
+        storage:
+          type: elasticsearch
+          elasticsearch:
+            host: "elasticsearch-master.logging.svc.cluster.local"
+            port: 9200
+
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: tracing
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true    # Required for Jaeger CRDs

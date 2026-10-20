@@ -1,0 +1,140 @@
+# ─── Istio Service Mesh ───────────────────────────────────────────────────────
+#
+# Deploys Istio via the official istio/base + istiod Helm charts.
+#
+# Architecture:
+#   - istio-base  : Installs all Istio CRDs into the cluster (VirtualService,
+#                   DestinationRule, Gateway, PeerAuthentication, etc.)
+#   - istiod      : The Istio control plane. Manages sidecar injection, mTLS
+#                   certificate issuance, traffic policies, and telemetry.
+#
+# Sidecar injection:
+#   Label namespaces to enable automatic Envoy sidecar injection:
+#     kubectl label namespace taskmanager istio-injection=enabled
+#   Pods in labelled namespaces get an Envoy proxy sidecar automatically.
+#
+# mTLS policy:
+#   STRICT mode is enabled globally — all pod-to-pod communication within the
+#   mesh is encrypted and mutually authenticated via SVID certificates.
+#
+# Observability integration:
+#   - Prometheus : istiod exposes /metrics on port 15014
+#   - Jaeger     : Traces forwarded to jaeger-collector.tracing.svc.cluster.local:4317 (OTLP)
+#
+# Sync Wave ordering:
+#   Wave 1: istio-base  — CRDs must be registered before istiod starts
+#   Wave 2: istiod      — Control plane depends on CRDs from Wave 1
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── 1. Istio Base (CRDs) ──────────────────────────────────────────────────────
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: istio-base
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: default
+
+  source:
+    repoURL: "https://istio-release.storage.googleapis.com/charts"
+    chart: base
+    targetRevision: "1.23.2"
+    helm:
+      releaseName: istio-base
+      values: |
+        defaultRevision: ""
+
+  destination:
+    server: "https://kubernetes.default.svc"
+    namespace: istio-system
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+
+---
+# ── 2. Istiod (Control Plane) ─────────────────────────────────────────────────
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: istiod
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: default
+
+  source:
+    repoURL: "https://istio-release.storage.googleapis.com/charts"
+    chart: istiod
+    targetRevision: "1.23.2"
+    helm:
+      releaseName: istiod
+      values: |
+        # ── Control Plane Placement & Sizing ──────────────────────────────────
+        replicaCount: 2
+        nodeSelector:
+          nodegroup: system
+
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+
+        # ── Global Mesh Configuration ─────────────────────────────────────────
+        meshConfig:
+          accessLogFile: "/dev/stdout"
+          accessLogEncoding: JSON
+          extensionProviders:
+            - name: prometheus
+              prometheus: {}
+            - name: jaeger
+              opentelemetry:
+                service: jaeger-collector.tracing.svc.cluster.local
+                port: 4317
+          defaultProviders:
+            tracing:
+              - jaeger
+
+        # ── Sidecar Proxy Defaults ────────────────────────────────────────────
+        global:
+          proxy:
+            resources:
+              requests:
+                cpu: "10m"
+                memory: "40Mi"
+              limits:
+                cpu: "200m"
+                memory: "256Mi"
+
+        # ── Telemetry ─────────────────────────────────────────────────────────
+        telemetry:
+          v2:
+            prometheus:
+              enabled: true
+
+  destination:
+    server: "https://kubernetes.default.svc"
+    namespace: istio-system
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true

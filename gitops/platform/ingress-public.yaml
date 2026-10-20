@@ -1,0 +1,93 @@
+# ─── Public Ingress Controller (nginx-public) ────────────────────────────────
+#
+# Provisions an internet-facing AWS Network Load Balancer (NLB) in the PUBLIC
+# subnets. All user-facing app traffic (Frontend + Backend API) enters here.
+#
+# Access model:
+#   http://<public-nlb-hostname>/       → Frontend (React)
+#   http://<public-nlb-hostname>/api/   → PostgREST Backend
+#
+# Only Ingress objects with: ingressClassName: nginx-public are served here.
+#
+# SSL Termination:
+#   When ssl_enabled is true, ACM cert ARN must be added to the NLB annotation:
+#   service.beta.kubernetes.io/aws-load-balancer-ssl-cert
+#   (managed separately in ssl.tf and cdn.tf in Terraform)
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ingress-nginx-public
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    # Sync Wave 1: Ingress controllers must come up before any app that uses Ingress
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: default
+
+  source:
+    repoURL: "https://kubernetes.github.io/ingress-nginx"
+    chart: ingress-nginx
+    targetRevision: "4.10.1"
+    helm:
+      releaseName: nginx-public
+      values: |
+        controller:
+          # Unique class name — only Ingress objects with ingressClassName: nginx-public
+          # are served by this controller
+          ingressClass: nginx-public
+          ingressClassByName: true
+
+          ingressClassResource:
+            name: nginx-public
+            enabled: true
+            default: false
+            controllerValue: "k8s.io/nginx-public"
+
+          # Launch an AWS NLB (internet-facing) in public subnets
+          service:
+            type: LoadBalancer
+            targetPorts:
+              http: http
+              https: http    # NLB terminates SSL on 443, forwards plaintext to Nginx on 80
+            annotations:
+              service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+              service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+              service.beta.kubernetes.io/aws-load-balancer-name: "eks-cluster-public-nlb"
+              service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
+              # NOTE: Add the ACM cert annotation here if ssl_enabled=true.
+              # The ARN is available from: terraform output acm_certificate_arn
+              # service.beta.kubernetes.io/aws-load-balancer-ssl-cert: "<ACM_CERT_ARN>"
+              # service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "https"
+              # service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "tcp"
+              # service.beta.kubernetes.io/aws-load-balancer-ssl-negotiation-policy: "ELBSecurityPolicy-TLS13-1-2-2021-06"
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
+          # Pin Ingress controller to system_nodes — never co-locate with app workloads
+          nodeSelector:
+            nodegroup: system
+
+          config:
+            use-real-ip: "true"
+            use-forwarded-headers: "true"
+
+  destination:
+    server: "https://kubernetes.default.svc"
+    namespace: ingress-nginx
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true # Required for ingress-nginx ClusterRole and webhook objects

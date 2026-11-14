@@ -17,8 +17,8 @@ echo "ERROR : $(grep -c "ERROR" /path/to/log/file.log)"
 # Count and rank top 5 IP addresses hitting a service (e.g. from access logs)
 awk '{print $1}' /var/log/nginx/access.log | sort | uniq -c | sort -nr | head -n 5
 
-# 1. Replace all occurrences of "http://" with "https://" in-place in a file:
-sed -i 's/http:\/\//https:\/\//g' config.yaml
+# 1. Replace all occurrences of "https://" with "http://" in-place in a file:
+sed -i 's/https:\/\//http:\/\//g' config.yaml
 
 # 2. Print only lines between line 50 and 60:
 sed -n '50,60p' /var/log/syslog
